@@ -1,0 +1,8 @@
+{
+  "name": "StockFlow POS",
+  "description": "Multi-store Point of Sale and Inventory Management System for electronics and accessories retail.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
