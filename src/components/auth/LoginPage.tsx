@@ -14,38 +14,80 @@ import {
 } from 'lucide-react';
 
 export const LoginPage: React.FC = () => {
-  const { signInWithEmail, isSupabaseActive, authError, users } = useAuth();
+  const { signInWithEmail, signUpWithEmail, isSupabaseActive, authError, users } = useAuth();
+  const [isSignUp, setIsSignUp] = useState(false);
+  const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setLocalError(null);
+    setSuccessMessage(null);
+
     if (!email.trim() || !password.trim()) {
       setLocalError('Please enter both your email address and password.');
       return;
     }
 
-    setLocalError(null);
-    setIsLoading(true);
-
-    try {
-      const result = await signInWithEmail(email.trim(), password);
-      if (!result.success && result.error) {
-        setLocalError(result.error);
+    if (isSignUp) {
+      if (!name.trim()) {
+        setLocalError('Please enter your full name.');
+        return;
       }
-    } catch (err: any) {
-      setLocalError(err?.message || 'An unexpected error occurred during sign in.');
-    } finally {
-      setIsLoading(false);
+      if (password !== confirmPassword) {
+        setLocalError('Passwords do not match.');
+        return;
+      }
+      if (password.length < 6) {
+        setLocalError('Password must be at least 6 characters.');
+        return;
+      }
+
+      setIsLoading(true);
+      try {
+        const result = await signUpWithEmail(email.trim(), password, name);
+        if (result.success) {
+          if (result.message) {
+            setSuccessMessage(result.message);
+            // Switch to login if confirmation is required
+            setIsSignUp(false);
+            setPassword('');
+            setConfirmPassword('');
+          }
+        } else if (result.error) {
+          setLocalError(result.error);
+        }
+      } catch (err: any) {
+        setLocalError(err?.message || 'An unexpected error occurred during sign up.');
+      } finally {
+        setIsLoading(false);
+      }
+    } else {
+      setIsLoading(true);
+      try {
+        const result = await signInWithEmail(email.trim(), password);
+        if (!result.success && result.error) {
+          setLocalError(result.error);
+        }
+      } catch (err: any) {
+        setLocalError(err?.message || 'An unexpected error occurred during sign in.');
+      } finally {
+        setIsLoading(false);
+      }
     }
   };
 
   const handleFillDemo = (demoEmail: string) => {
+    setIsSignUp(false);
     setEmail(demoEmail);
     setPassword('StockFlow2026!');
     setLocalError(null);
+    setSuccessMessage(null);
   };
 
   const adminDemo = users.find((u) => u.role === 'ADMIN');
@@ -71,7 +113,7 @@ export const LoginPage: React.FC = () => {
         </div>
 
         <h2 className="text-center text-xl sm:text-2xl font-bold tracking-tight text-white">
-          Sign in to your terminal
+          {isSignUp ? 'Create an account' : 'Sign in to your terminal'}
         </h2>
         <p className="mt-1 text-center text-xs text-slate-400">
           Multi-store POS, real-time inventory, and corporate sales engine
@@ -101,7 +143,40 @@ export const LoginPage: React.FC = () => {
             </div>
           )}
 
+          {successMessage && (
+            <div className="mb-6 p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs flex items-start gap-3 animate-in fade-in duration-200">
+              <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <p className="font-semibold text-emerald-200">Success</p>
+                <p className="text-slate-300 leading-relaxed">{successMessage}</p>
+              </div>
+            </div>
+          )}
+
           <form className="space-y-5" onSubmit={handleSubmit}>
+            {isSignUp && (
+              <div className="animate-in slide-in-from-top-4 duration-300 fade-in">
+                <label htmlFor="name" className="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5">
+                  Full Name
+                </label>
+                <div className="relative rounded-xl shadow-xs">
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
+                    <Sparkles className="h-4 w-4" />
+                  </div>
+                  <input
+                    id="name"
+                    name="name"
+                    type="text"
+                    required={isSignUp}
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="John Doe"
+                    className="block w-full pl-10 pr-3 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white placeholder-slate-500 text-sm focus:outline-hidden focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
+                  />
+                </div>
+              </div>
+            )}
+
             <div>
               <label htmlFor="email" className="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5">
                 Staff Email Address
@@ -136,7 +211,7 @@ export const LoginPage: React.FC = () => {
                   id="password"
                   name="password"
                   type="password"
-                  autoComplete="current-password"
+                  autoComplete={isSignUp ? "new-password" : "current-password"}
                   required
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
@@ -145,6 +220,30 @@ export const LoginPage: React.FC = () => {
                 />
               </div>
             </div>
+
+            {isSignUp && (
+              <div className="animate-in slide-in-from-top-4 duration-300 fade-in">
+                <label htmlFor="confirmPassword" className="block text-xs font-semibold uppercase tracking-wider text-slate-300 mb-1.5">
+                  Confirm Password
+                </label>
+                <div className="relative rounded-xl shadow-xs">
+                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-500">
+                    <ShieldCheck className="h-4 w-4" />
+                  </div>
+                  <input
+                    id="confirmPassword"
+                    name="confirmPassword"
+                    type="password"
+                    autoComplete="new-password"
+                    required={isSignUp}
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    placeholder="••••••••"
+                    className="block w-full pl-10 pr-3 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-white placeholder-slate-500 text-sm focus:outline-hidden focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition-colors"
+                  />
+                </div>
+              </div>
+            )}
 
             <div>
               <button
@@ -156,10 +255,24 @@ export const LoginPage: React.FC = () => {
                   <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                 ) : (
                   <>
-                    <span>Sign In to Terminal</span>
+                    <span>{isSignUp ? 'Sign Up' : 'Sign In to Terminal'}</span>
                     <ArrowRight className="w-4 h-4" />
                   </>
                 )}
+              </button>
+            </div>
+            
+            <div className="text-center mt-4">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsSignUp(!isSignUp);
+                  setLocalError(null);
+                  setSuccessMessage(null);
+                }}
+                className="text-sm text-emerald-400 hover:text-emerald-300 font-medium cursor-pointer"
+              >
+                {isSignUp ? 'Already have an account? Sign in' : "Don't have an account? Sign up"}
               </button>
             </div>
           </form>

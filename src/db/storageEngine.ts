@@ -73,6 +73,18 @@ function safeSetItem(key: string, value: string): void {
   memoryStorage[key] = value;
 }
 
+function safeRemoveItem(key: string): void {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.removeItem(key);
+      return;
+    }
+  } catch {
+    // fallback
+  }
+  delete memoryStorage[key];
+}
+
 export class StorageEngine {
   private static instance: StorageEngine;
 
@@ -97,7 +109,7 @@ export class StorageEngine {
     safeSetItem(STORAGE_KEYS.MOVEMENTS, JSON.stringify([]));
     safeSetItem(STORAGE_KEYS.TRANSFERS, JSON.stringify([]));
     safeSetItem(STORAGE_KEYS.AUDIT_LOGS, JSON.stringify(INITIAL_AUDIT_LOGS));
-    safeSetItem(STORAGE_KEYS.CURRENT_USER_ID, 'user-admin');
+    safeRemoveItem(STORAGE_KEYS.CURRENT_USER_ID);
     safeSetItem(STORAGE_KEYS.INITIALIZED, 'true_v2');
   }
 
@@ -115,15 +127,19 @@ export class StorageEngine {
   }
 
   // Current Session User
-  public getCurrentUser(): User {
-    const currentId = safeGetItem(STORAGE_KEYS.CURRENT_USER_ID) || 'user-admin';
+  public getCurrentUser(): User | null {
+    const currentId = safeGetItem(STORAGE_KEYS.CURRENT_USER_ID);
+    if (!currentId) return null;
     const users = this.getUsers();
-    const user = users.find((u) => u.id === currentId);
-    return user || users[0] || SEED_USERS[0];
+    return users.find((u) => u.id === currentId) || null;
   }
 
-  public setCurrentUser(userId: string): void {
-    safeSetItem(STORAGE_KEYS.CURRENT_USER_ID, userId);
+  public setCurrentUser(userId: string | null): void {
+    if (userId) {
+      safeSetItem(STORAGE_KEYS.CURRENT_USER_ID, userId);
+    } else {
+      safeRemoveItem(STORAGE_KEYS.CURRENT_USER_ID);
+    }
   }
 
   // STORES

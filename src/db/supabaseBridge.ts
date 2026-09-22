@@ -118,15 +118,6 @@ export class SupabaseBridge {
           return { success: false, error: error.message };
         }
 
-        // Keep local cache up to date as well
-        storage.processSale({
-          userId: params.userId,
-          storeId: params.storeId,
-          items: params.items,
-          paymentMethod: params.paymentMethod,
-          discount: params.discount,
-        });
-
         return { success: true, sale: data };
       } catch (err: any) {
         return { success: false, error: err.message || 'RPC Checkout failed' };

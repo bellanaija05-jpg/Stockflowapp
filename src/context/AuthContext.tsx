@@ -14,6 +14,7 @@ interface AuthContextType {
   isSupabaseActive: boolean;
   authError: string | null;
   signInWithEmail: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  signUpWithEmail: (email: string, password: string, name: string) => Promise<{ success: boolean; error?: string; message?: string }>;
   signOut: () => Promise<void>;
   switchUser: (userId: string) => void;
   refreshUserData: () => Promise<void>;
@@ -285,6 +286,51 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   /**
+   * Real Supabase Sign Up with email, password, and name
+   */
+  const signUpWithEmail = async (email: string, password: string, name: string): Promise<{ success: boolean; error?: string; message?: string }> => {
+    setAuthError(null);
+
+    if (isSupabaseActive && supabase) {
+      try {
+        const { data, error } = await supabase.auth.signUp({
+          email: email.trim(),
+          password: password,
+          options: {
+            data: {
+              name: name.trim(),
+            },
+          },
+        });
+
+        if (error) {
+          setAuthError(error.message);
+          return { success: false, error: error.message };
+        }
+        
+        // If email confirmation is enabled, session will be null
+        if (data.user && !data.session) {
+          return { 
+            success: true, 
+            message: 'Account created successfully! Please check your email for a confirmation link.' 
+          };
+        }
+
+        // If auto sign-in occurs, the auth state listener will handle profile fetching
+        return { success: true };
+      } catch (err: any) {
+        const msg = err?.message || 'Failed to sign up.';
+        setAuthError(msg);
+        return { success: false, error: msg };
+      }
+    }
+
+    const errorMsg = 'Sign up is not supported in local demo mode. Please configure Supabase.';
+    setAuthError(errorMsg);
+    return { success: false, error: errorMsg };
+  };
+
+  /**
    * Sign out current user
    */
   const signOut = async (): Promise<void> => {
@@ -295,6 +341,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch (err) {
       console.warn('Supabase sign out error:', err);
     } finally {
+      storage.setCurrentUser(null);
       setCurrentUser(null);
       setUserProfile(null);
       setAuthError(null);
@@ -347,6 +394,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isSupabaseActive,
         authError,
         signInWithEmail,
+        signUpWithEmail,
         signOut,
         switchUser,
         refreshUserData,

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { StorageEngine } from '../db/storageEngine';
+import { SupabaseBridge } from '../db/supabaseBridge';
 import { Category, PaymentMethod, Product, Sale, Store } from '../types';
 import { formatNaira } from '../../src/utils/currency';
 import { POSCart, CartItem } from '../components/pos/POSCart';
@@ -285,7 +286,7 @@ export const POSPage: React.FC = () => {
   }, [products, selectedCategory, searchQuery]);
 
   // Complete Checkout
-  const handleCheckout = () => {
+  const handleCheckout = async () => {
     if (!currentUser) {
       setCheckoutError('User session is invalid. Please log in.');
       return;
@@ -300,16 +301,18 @@ export const POSPage: React.FC = () => {
     setCheckoutError(null);
 
     // Call atomic checkout engine
-    const result = storage.processSale({
+    const result = await SupabaseBridge.executeAtomicCheckout({
       userId: currentUser.id,
       storeId: selectedStoreId,
+      attendantId: currentUser.id,
+      attendantName: currentUser.name,
       items: cart.map((item) => ({
         productId: item.product.id,
         quantity: item.quantity,
+        unitPrice: item.product.sellingPrice,
       })),
       paymentMethod,
       discount,
-      notes: notes.trim() || undefined,
     });
 
     setIsProcessing(false);
