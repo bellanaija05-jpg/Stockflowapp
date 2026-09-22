@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { User, Role, UserStatus } from '../types';
-import { storage } from '../db/storageEngine';
 import { SupabaseBridge } from '../db/supabaseBridge';
 import { AccessDenied } from '../components/common/AccessDenied';
+import { AuditWriteWarning } from '../components/common/AuditWriteWarning';
 import {
   Users,
   Plus,
@@ -39,6 +39,9 @@ export const UsersPage: React.FC<UsersPageProps> = ({ onNavigateHome }) => {
     status: 'ACTIVE' as UserStatus,
   });
   const [errorMessage, setErrorMessage] = useState('');
+
+  // Milestone 5D-B: audit-trail write failures (surfaced, never silently swallowed)
+  const [auditWarning, setAuditWarning] = useState<string | null>(null);
 
   if (!isAdmin) {
     return <AccessDenied requiredRole="Super Admin" onGoBack={onNavigateHome} />;
@@ -111,18 +114,20 @@ export const UsersPage: React.FC<UsersPageProps> = ({ onNavigateHome }) => {
       };
       await SupabaseBridge.saveProfile(updated);
 
-      // Audit Log
-      storage.addAuditLog({
-        id: `aud-${Date.now()}`,
-        userId: currentUser?.id || 'admin',
-        userName: currentUser?.name || 'Super Admin',
-        userRole: 'ADMIN',
+      // Audit Log (Milestone 5D-B: Supabase when connected, localStorage when offline)
+      const audit = await SupabaseBridge.writeAuditLog({
         action: 'USER_UPDATED',
         entity: 'User',
         entityId: updated.id,
         details: `Updated user "${updated.name}" (${updated.email}) - Assigned Store: ${getStoreName(updated.assignedStoreId)} - Status: ${updated.status}`,
-        createdAt: now,
+        userName: currentUser?.name || 'Super Admin',
+        userRole: 'ADMIN',
+        userId: currentUser?.id,
       });
+      if (!audit.success) {
+        console.error('[audit] USER_UPDATED not recorded:', audit.error);
+        setAuditWarning(audit.error || 'Unknown error.');
+      }
     } else {
       const newUser: User = {
         id: `user-${Date.now().toString().slice(-4)}`,
@@ -136,18 +141,20 @@ export const UsersPage: React.FC<UsersPageProps> = ({ onNavigateHome }) => {
       };
       await SupabaseBridge.saveProfile(newUser);
 
-      // Audit Log
-      storage.addAuditLog({
-        id: `aud-${Date.now()}`,
-        userId: currentUser?.id || 'admin',
-        userName: currentUser?.name || 'Super Admin',
-        userRole: 'ADMIN',
+      // Audit Log (Milestone 5D-B: Supabase when connected, localStorage when offline)
+      const audit = await SupabaseBridge.writeAuditLog({
         action: 'USER_CREATED',
         entity: 'User',
         entityId: newUser.id,
         details: `Created new ${newUser.role} user "${newUser.name}" assigned to ${getStoreName(newUser.assignedStoreId)}`,
-        createdAt: now,
+        userName: currentUser?.name || 'Super Admin',
+        userRole: 'ADMIN',
+        userId: currentUser?.id,
       });
+      if (!audit.success) {
+        console.error('[audit] USER_CREATED not recorded:', audit.error);
+        setAuditWarning(audit.error || 'Unknown error.');
+      }
     }
 
     await refreshUserData();
@@ -156,6 +163,8 @@ export const UsersPage: React.FC<UsersPageProps> = ({ onNavigateHome }) => {
 
   return (
     <div className="space-y-6">
+      <AuditWriteWarning reason={auditWarning} onDismiss={() => setAuditWarning(null)} />
+
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>

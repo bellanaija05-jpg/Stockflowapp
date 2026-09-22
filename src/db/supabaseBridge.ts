@@ -8,10 +8,21 @@ import {
   Store,
   AuditAction,
   AuditLog,
+  Role,
   User,
   Category,
   InventoryMovement,
 } from '../types';
+
+/**
+ * Milestone 5D-C: product metadata normalisation.
+ * Empty/whitespace-only text is stored as NULL so that "not recorded" is
+ * distinguishable from a deliberate value and round-trips losslessly.
+ */
+const toNullableText = (value?: string | null): string | null => {
+  const trimmed = (value ?? '').trim();
+  return trimmed.length > 0 ? trimmed : null;
+};
 
 /**
  * Supabase Data Sync & Migration Helper
@@ -68,6 +79,11 @@ export class SupabaseBridge {
         cost_price: p.costPrice,
         selling_price: p.sellingPrice,
         reorder_level: p.reorderLevel,
+        // Milestone 5D-C: metadata parity — payload only, never executed here.
+        brand: toNullableText(p.brand),
+        model: toNullableText(p.model),
+        variant: toNullableText(p.variant),
+        description: toNullableText(p.description),
         status: p.status,
       }));
       const { error: prodErr } = await supabase.from('products').upsert(productsPayload, { onConflict: 'id' });
@@ -167,8 +183,11 @@ export class SupabaseBridge {
         sku: p.sku,
         barcode: p.barcode || '',
         categoryId: p.category_id,
-        brand: p.name.split(' ')[0] || '', // Simple fallback, brand is not in DB schema currently
-        model: '',
+        brand: p.brand ?? '',
+        // Milestone 5D-C: real persisted metadata (no name-derived synthesis).
+        model: p.model ?? '',
+        variant: p.variant ?? undefined,
+        description: p.description ?? undefined,
         costPrice: p.cost_price,
         sellingPrice: p.selling_price,
         reorderLevel: p.reorder_level,
@@ -359,13 +378,98 @@ export class SupabaseBridge {
         entity: l.entity,
         entityId: l.entity_id,
         // DB stores JSONB; the UI AuditLog.details is a display string.
-        details: typeof l.details === 'string' ? l.details : JSON.stringify(l.details ?? ''),
+        // Milestone 5D-B: management log entries (and both RPCs) write
+        // { message: "..." }, so unwrap it; any other shape falls back to JSON.
+        details:
+          typeof l.details === 'string'
+            ? l.details
+            : typeof l.details?.message === 'string'
+              ? l.details.message
+              : JSON.stringify(l.details ?? ''),
         createdAt: l.created_at,
       }));
 
       return { success: true, logs };
     } catch (err: any) {
       return { success: false, error: err.message || 'Failed to fetch audit logs' };
+    }
+  }
+
+  /**
+   * Milestone 5D-B: append a management audit entry.
+   *
+   * Connected + authenticated  -> writes to Supabase `audit_logs` and NEVER falls
+   * back to localStorage on failure; the error is returned so the caller can
+   * surface it to the operator.
+   * Offline demo mode (Supabase not configured, or configured but signed out)
+   * -> writes through the StorageEngine, preserving the pre-5D-B behaviour.
+   *
+   * The row `id` is deliberately omitted so the database default
+   * (uuid_generate_v4()) generates it — a client-side `aud-${Date.now()}` can
+   * collide when two actions land in the same millisecond.
+   */
+  public static async writeAuditLog(entry: {
+    action: AuditAction;
+    entity: string;
+    entityId: string;
+    details: string;
+    userName: string;
+    userRole: Role;
+    userId?: string;
+  }): Promise<{ success: boolean; persistedTo: 'supabase' | 'local'; error?: string }> {
+    const writeLocal = (): { success: boolean; persistedTo: 'local' } => {
+      storage.addAuditLog({
+        id: `aud-${Date.now()}`,
+        userId: entry.userId || 'system',
+        userName: entry.userName,
+        userRole: entry.userRole,
+        action: entry.action,
+        entity: entry.entity,
+        entityId: entry.entityId,
+        details: entry.details,
+        createdAt: new Date().toISOString(),
+      });
+      return { success: true, persistedTo: 'local' };
+    };
+
+    if (!this.isConnected() || !supabase) {
+      return writeLocal();
+    }
+
+    try {
+      // Identity must come from the auth session: audit_logs.user_id is a UUID FK
+      // to auth.users, while local demo user ids (e.g. 'user-0001') are not UUIDs.
+      const { data: sessionData } = await supabase.auth.getSession();
+      const authUserId = sessionData?.session?.user?.id;
+
+      if (!authUserId) {
+        // Supabase is configured but nobody is signed in (local/demo session):
+        // keep the app usable. A failed insert WITH a session never falls back.
+        return writeLocal();
+      }
+
+      const { error } = await supabase.from('audit_logs').insert({
+        user_id: authUserId,
+        user_name: entry.userName,
+        user_role: entry.userRole,
+        action: entry.action,
+        entity: entry.entity,
+        entity_id: entry.entityId,
+        // Same JSONB shape as process_pos_checkout / adjust_inventory_stock.
+        details: { message: entry.details },
+      });
+
+      if (error) {
+        return { success: false, persistedTo: 'supabase', error: error.message };
+      }
+
+      return { success: true, persistedTo: 'supabase' };
+    } catch (err: any) {
+      return {
+        success: false,
+        persistedTo: 'supabase',
+        error: err?.message || 'Failed to write audit log',
+      };
     }
   }
 
@@ -469,6 +573,11 @@ export class SupabaseBridge {
         cost_price: product.costPrice,
         selling_price: product.sellingPrice,
         reorder_level: product.reorderLevel,
+        // Milestone 5D-C: persisted product metadata (empty -> NULL).
+        brand: toNullableText(product.brand),
+        model: toNullableText(product.model),
+        variant: toNullableText(product.variant),
+        description: toNullableText(product.description),
         status: product.status,
         updated_at: new Date().toISOString(),
       }, { onConflict: 'id' });

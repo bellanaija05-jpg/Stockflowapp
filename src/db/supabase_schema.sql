@@ -69,6 +69,11 @@ CREATE TABLE IF NOT EXISTS products (
     name TEXT NOT NULL,
     sku TEXT NOT NULL UNIQUE,
     barcode TEXT,
+    -- Milestone 5D-C: product metadata (NULL = "not recorded yet")
+    brand TEXT,
+    model TEXT,
+    variant TEXT,
+    description TEXT,
     category_id TEXT NOT NULL REFERENCES categories(id) ON DELETE RESTRICT,
     cost_price NUMERIC(12, 2) NOT NULL CHECK (cost_price >= 0),
     selling_price NUMERIC(12, 2) NOT NULL CHECK (selling_price >= 0),
@@ -306,6 +311,17 @@ CREATE POLICY "Super Admins can read audit logs"
     TO authenticated
     USING (get_auth_role() = 'ADMIN');
 
+-- AUDIT LOGS Policies (Milestone 5D-B)
+-- The management pages (Products, Stores, Users) append their audit rows with the
+-- authenticated client, so an INSERT policy is required; without one, RLS
+-- (enabled above with default-deny) rejects every client insert. Rows stay
+-- append-only: no UPDATE/DELETE policies exist, and the two SECURITY DEFINER
+-- RPCs (process_pos_checkout, adjust_inventory_stock) keep bypassing RLS.
+CREATE POLICY "Super Admins can insert own audit logs"
+    ON audit_logs FOR INSERT
+    TO authenticated
+    WITH CHECK (get_auth_role() = 'ADMIN' AND user_id = auth.uid());
+
 -- ==============================================================================
 -- 5A.8 ATOMIC POS CHECKOUT STORED PROCEDURE (RPC)
 -- ==============================================================================
@@ -531,3 +547,37 @@ BEGIN
     );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- ==============================================================================
+-- MILESTONE 5D-C MIGRATION — PRODUCT METADATA + STATUS LIFECYCLE
+-- ==============================================================================
+-- Review before running. Idempotent and safe to re-run.
+-- These statements never seed, merge, reconcile, or overwrite catalog data.
+
+-- 1. Product metadata columns. Nullable on purpose: every existing row predates
+--    these columns, and NULL means "not recorded yet" (never a fabricated value).
+ALTER TABLE public.products
+    ADD COLUMN IF NOT EXISTS brand       TEXT,
+    ADD COLUMN IF NOT EXISTS model       TEXT,
+    ADD COLUMN IF NOT EXISTS variant     TEXT,
+    ADD COLUMN IF NOT EXISTS description TEXT;
+
+-- 2. Allow the third lifecycle state (DISCONTINUED). No existing row is affected:
+--    the value was previously unrepresentable, so nothing needs migrating.
+--    Confirm the auto-generated constraint name first:
+--      SELECT conname, pg_get_constraintdef(oid)
+--      FROM pg_constraint WHERE conrelid = 'public.products'::regclass;
+ALTER TABLE public.products DROP CONSTRAINT IF EXISTS products_status_check;
+ALTER TABLE public.products ADD  CONSTRAINT products_status_check
+    CHECK (status IN ('ACTIVE', 'INACTIVE', 'DISCONTINUED'));
+
+-- 3. OPTIONAL, approval-gated metadata backfill — brand/model ONLY, listed SKUs ONLY.
+--    Never touches name, price, status, category, sku or any other table.
+--    Leave commented out until the SKU mapping has been reviewed and approved.
+-- UPDATE public.products AS p
+-- SET brand = v.brand, model = v.model
+-- FROM (VALUES
+--     ('ORA-FP4-BLK', 'Oraimo', 'FreePods 4')
+-- ) AS v(sku, brand, model)
+-- WHERE p.sku = v.sku
+--   AND (p.brand IS DISTINCT FROM v.brand OR p.model IS DISTINCT FROM v.model);

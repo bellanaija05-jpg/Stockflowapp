@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { Store, StoreStatus } from '../types';
-import { storage } from '../db/storageEngine';
 import { SupabaseBridge } from '../db/supabaseBridge';
 import { AccessDenied } from '../components/common/AccessDenied';
+import { AuditWriteWarning } from '../components/common/AuditWriteWarning';
 import {
   Store as StoreIcon,
   Plus,
@@ -37,6 +37,9 @@ export const StoresPage: React.FC<StoresPageProps> = ({ onNavigateHome }) => {
     status: 'ACTIVE' as StoreStatus,
   });
   const [errorMessage, setErrorMessage] = useState('');
+
+  // Milestone 5D-B: audit-trail write failures (surfaced, never silently swallowed)
+  const [auditWarning, setAuditWarning] = useState<string | null>(null);
 
   if (!isAdmin) {
     return <AccessDenied requiredRole="Super Admin" onGoBack={onNavigateHome} />;
@@ -105,18 +108,20 @@ export const StoresPage: React.FC<StoresPageProps> = ({ onNavigateHome }) => {
       };
       await SupabaseBridge.saveStore(updated);
 
-      // Audit Log
-      storage.addAuditLog({
-        id: `aud-${Date.now()}`,
-        userId: currentUser?.id || 'admin',
-        userName: currentUser?.name || 'Super Admin',
-        userRole: 'ADMIN',
+      // Audit Log (Milestone 5D-B: Supabase when connected, localStorage when offline)
+      const audit = await SupabaseBridge.writeAuditLog({
         action: 'STORE_UPDATED',
         entity: 'Store',
         entityId: updated.id,
         details: `Updated store "${updated.name}" (${updated.location}) - Status: ${updated.status}`,
-        createdAt: now,
+        userName: currentUser?.name || 'Super Admin',
+        userRole: 'ADMIN',
+        userId: currentUser?.id,
       });
+      if (!audit.success) {
+        console.error('[audit] STORE_UPDATED not recorded:', audit.error);
+        setAuditWarning(audit.error || 'Unknown error.');
+      }
     } else {
       // Create Store
       const newId = `store-${Date.now().toString().slice(-4)}`;
@@ -131,18 +136,20 @@ export const StoresPage: React.FC<StoresPageProps> = ({ onNavigateHome }) => {
       };
       await SupabaseBridge.saveStore(newStore);
 
-      // Audit Log
-      storage.addAuditLog({
-        id: `aud-${Date.now()}`,
-        userId: currentUser?.id || 'admin',
-        userName: currentUser?.name || 'Super Admin',
-        userRole: 'ADMIN',
+      // Audit Log (Milestone 5D-B: Supabase when connected, localStorage when offline)
+      const audit = await SupabaseBridge.writeAuditLog({
         action: 'STORE_CREATED',
         entity: 'Store',
         entityId: newStore.id,
         details: `Provisioned new retail branch "${newStore.name}" located at ${newStore.location}`,
-        createdAt: now,
+        userName: currentUser?.name || 'Super Admin',
+        userRole: 'ADMIN',
+        userId: currentUser?.id,
       });
+      if (!audit.success) {
+        console.error('[audit] STORE_CREATED not recorded:', audit.error);
+        setAuditWarning(audit.error || 'Unknown error.');
+      }
     }
 
     await refreshUserData();
@@ -151,6 +158,8 @@ export const StoresPage: React.FC<StoresPageProps> = ({ onNavigateHome }) => {
 
   return (
     <div className="space-y-6">
+      <AuditWriteWarning reason={auditWarning} onDismiss={() => setAuditWarning(null)} />
+
       {/* Top Banner and Quick Stats */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>

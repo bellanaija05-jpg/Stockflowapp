@@ -1,10 +1,10 @@
 import React, { useState, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { Product, Category, ProductStatus, StoreInventory } from '../types';
-import { storage } from '../db/storageEngine';
+import { AuditAction, Product, Category, ProductStatus, StoreInventory } from '../types';
 import { SupabaseBridge } from '../db/supabaseBridge';
 import { formatNaira } from '../utils/currency';
 import { StockAdjustmentModal } from '../components/inventory/StockAdjustmentModal';
+import { AuditWriteWarning } from '../components/common/AuditWriteWarning';
 import {
   Package,
   Search,
@@ -27,6 +27,96 @@ import {
   ExternalLink,
   ShieldAlert,
 } from 'lucide-react';
+
+/* =========================================================================
+   MILESTONE 5D-C: PRODUCT CHANGE CLASSIFICATION
+   Single source of truth for audit semantics, shared by the Edit modal and
+   the quick status toggle so the two UI paths cannot diverge.
+========================================================================= */
+
+/** Persisted product fields compared to detect a "details" change. */
+const PRODUCT_FIELD_LABELS: Array<{ key: keyof Product; label: string }> = [
+  { key: 'name', label: 'name' },
+  { key: 'sku', label: 'SKU' },
+  { key: 'barcode', label: 'barcode' },
+  { key: 'categoryId', label: 'category' },
+  { key: 'costPrice', label: 'cost price' },
+  { key: 'sellingPrice', label: 'selling price' },
+  { key: 'reorderLevel', label: 'reorder level' },
+  { key: 'brand', label: 'brand' },
+  { key: 'model', label: 'model' },
+  { key: 'variant', label: 'variant' },
+  { key: 'description', label: 'description' },
+];
+
+const normalizeFieldValue = (value: unknown): string => {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+};
+
+type ProductChangeKind = 'NONE' | 'STATUS' | 'DETAILS' | 'STATUS_AND_DETAILS';
+
+interface ProductChange {
+  kind: ProductChangeKind;
+  action: AuditAction | null;
+  details: string;
+}
+
+const changedFieldLabels = (original: Product, next: Product): string[] =>
+  PRODUCT_FIELD_LABELS.filter(
+    (field) => normalizeFieldValue(original[field.key]) !== normalizeFieldValue(next[field.key])
+  ).map((field) => field.label);
+
+const statusChangeAction = (status: ProductStatus): AuditAction =>
+  status === 'ACTIVE'
+    ? 'PRODUCT_ACTIVATED'
+    : status === 'DISCONTINUED'
+    ? 'PRODUCT_DISCONTINUED'
+    : 'PRODUCT_DEACTIVATED';
+
+const statusChangeVerb = (status: ProductStatus): string =>
+  status === 'ACTIVE' ? 'Activated' : status === 'DISCONTINUED' ? 'Discontinued' : 'Deactivated';
+
+/**
+ * Decide the audit action + message for a product save:
+ * - status only            -> PRODUCT_ACTIVATED / PRODUCT_DEACTIVATED / PRODUCT_DISCONTINUED
+ * - details only           -> PRODUCT_EDITED
+ * - status + details       -> ONE entry keyed to the status transition (lists the other changes)
+ * - no meaningful change   -> no audit entry at all
+ */
+const describeProductChange = (original: Product, next: Product): ProductChange => {
+  const statusChanged = original.status !== next.status;
+  const fields = changedFieldLabels(original, next);
+  const detailsChanged = fields.length > 0;
+
+  if (!statusChanged && !detailsChanged) {
+    return { kind: 'NONE', action: null, details: '' };
+  }
+
+  const identifier = `"${next.name}" (${next.sku})`;
+
+  if (statusChanged && detailsChanged) {
+    return {
+      kind: 'STATUS_AND_DETAILS',
+      action: statusChangeAction(next.status),
+      details: `${statusChangeVerb(next.status)} product ${identifier} - also changed: ${fields.join(', ')}`,
+    };
+  }
+
+  if (statusChanged) {
+    return {
+      kind: 'STATUS',
+      action: statusChangeAction(next.status),
+      details: `${statusChangeVerb(next.status)} product ${identifier}`,
+    };
+  }
+
+  return {
+    kind: 'DETAILS',
+    action: 'PRODUCT_EDITED',
+    details: `Updated product ${identifier} - changed: ${fields.join(', ')}`,
+  };
+};
 
 export const ProductsPage: React.FC = () => {
   const { currentUser, currentStore, isAdmin, stores } = useAuth();
@@ -56,6 +146,15 @@ export const ProductsPage: React.FC = () => {
   // Stock Adjustment Modal
   const [isAdjustModalOpen, setIsAdjustModalOpen] = useState(false);
   const [adjustProductId, setAdjustProductId] = useState<string>('');
+
+  // Milestone 5D-B: audit-trail write failures (surfaced, never silently swallowed)
+  const [auditWarning, setAuditWarning] = useState<string | null>(null);
+
+  // Milestone 5D-C: save failures (surfaced, never silently swallowed)
+  const [saveWarning, setSaveWarning] = useState<string | null>(null);
+
+  // Milestone 5D-C: re-entrancy guard for the quick status toggle (no duplicate saves/audit rows).
+  const statusToggleBusy = React.useRef(false);
 
   const loadData = async () => {
     setIsLoading(true);
@@ -190,26 +289,45 @@ export const ProductsPage: React.FC = () => {
 
   // Handle deactivate/toggle status
   const handleToggleProductStatus = async (product: Product) => {
-    if (!isAdmin) return;
+    if (!isAdmin || statusToggleBusy.current) return;
+    statusToggleBusy.current = true;
     const nextStatus: ProductStatus = product.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
     const updated: Product = {
       ...product,
       status: nextStatus,
       updatedAt: new Date().toISOString(),
     };
-    await SupabaseBridge.saveProduct(updated);
-    storage.addAuditLog({
-      id: `aud-${Date.now()}`,
-      userId: currentUser?.id || 'admin',
-      userName: currentUser?.name || 'Staff',
-      userRole: currentUser?.role || 'ADMIN',
-      action: nextStatus === 'ACTIVE' ? 'PRODUCT_ACTIVATED' : 'PRODUCT_DEACTIVATED',
-      entity: 'Product',
-      entityId: product.id,
-      details: `${nextStatus === 'ACTIVE' ? 'Activated' : 'Deactivated'} product "${product.name}" (${product.sku})`,
-      createdAt: new Date().toISOString(),
-    });
+
+    // Milestone 5D-C: never claim success (or log an audit entry) when the save failed.
+    const saveRes = await SupabaseBridge.saveProduct(updated);
+    if (!saveRes.success) {
+      console.error('[product] status change not saved:', saveRes.error);
+      setSaveWarning(saveRes.error || 'Unknown error.');
+      statusToggleBusy.current = false;
+      return;
+    }
+
+    // Milestone 5D-C: audit semantics come from the shared change classifier.
+    const change = describeProductChange(product, updated);
+    if (change.action) {
+      // Milestone 5D-B: Supabase when connected, localStorage when offline.
+      const audit = await SupabaseBridge.writeAuditLog({
+        action: change.action,
+        entity: 'Product',
+        entityId: product.id,
+        details: change.details,
+        userName: currentUser?.name || 'Staff',
+        userRole: currentUser?.role || 'ADMIN',
+        userId: currentUser?.id,
+      });
+      if (!audit.success) {
+        console.error('[audit] PRODUCT status change not recorded:', audit.error);
+        setAuditWarning(audit.error || 'Unknown error.');
+      }
+    }
+
     refreshData();
+    statusToggleBusy.current = false;
   };
 
   if (isLoading) {
@@ -240,6 +358,14 @@ export const ProductsPage: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      <AuditWriteWarning reason={auditWarning} onDismiss={() => setAuditWarning(null)} />
+      <AuditWriteWarning
+        reason={saveWarning}
+        title="Product was not saved"
+        body="Supabase rejected the change. Nothing was written:"
+        onDismiss={() => setSaveWarning(null)}
+      />
+
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
@@ -678,6 +804,7 @@ export const ProductsPage: React.FC = () => {
           }}
           productToEdit={editingProduct}
           categories={categories}
+          onAuditWarning={setAuditWarning}
         />
       )}
 
@@ -691,6 +818,7 @@ export const ProductsPage: React.FC = () => {
           }}
           categories={categories}
           products={products}
+          onAuditWarning={setAuditWarning}
         />
       )}
 
@@ -731,6 +859,7 @@ interface AddEditProductModalProps {
   onSuccess: () => void;
   productToEdit: Product | null;
   categories: Category[];
+  onAuditWarning?: (reason: string) => void;
 }
 
 const AddEditProductModal: React.FC<AddEditProductModalProps> = ({
@@ -739,6 +868,7 @@ const AddEditProductModal: React.FC<AddEditProductModalProps> = ({
   onSuccess,
   productToEdit,
   categories,
+  onAuditWarning,
 }) => {
   const { currentUser } = useAuth();
   const isEditing = !!productToEdit;
@@ -758,6 +888,8 @@ const AddEditProductModal: React.FC<AddEditProductModalProps> = ({
   const [status, setStatus] = useState<ProductStatus>(productToEdit?.status || 'ACTIVE');
   const [description, setDescription] = useState(productToEdit?.description || '');
   const [error, setError] = useState('');
+  // Milestone 5D-C: guard against double submits (which would duplicate audit entries).
+  const [isSaving, setIsSaving] = useState(false);
 
   // Auto-generate SKU
   const handleAutoGenerateSku = () => {
@@ -779,6 +911,7 @@ const AddEditProductModal: React.FC<AddEditProductModalProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSaving) return;
     setError('');
 
     if (!name.trim()) {
@@ -818,18 +951,34 @@ const AddEditProductModal: React.FC<AddEditProductModalProps> = ({
         updatedAt: now,
       };
 
-      await SupabaseBridge.saveProduct(updatedProduct);
-      storage.addAuditLog({
-        id: `aud-${Date.now()}`,
-        userId: currentUser?.id || 'admin',
-        userName: currentUser?.name || 'Staff',
-        userRole: currentUser?.role || 'ADMIN',
-        action: 'PRODUCT_EDITED',
-        entity: 'Product',
-        entityId: updatedProduct.id,
-        details: `Updated product ${updatedProduct.name} (${updatedProduct.sku}) - Price: ₦${updatedProduct.sellingPrice.toLocaleString()}`,
-        createdAt: now,
-      });
+      setIsSaving(true);
+      // Milestone 5D-C: never claim success when the database rejected the change.
+      const saveRes = await SupabaseBridge.saveProduct(updatedProduct);
+      if (!saveRes.success) {
+        setIsSaving(false);
+        setError(saveRes.error || 'The product could not be saved. No changes were made.');
+        return;
+      }
+
+      // Milestone 5D-C: audit action derived from the actual before/after change.
+      const change = describeProductChange(productToEdit, updatedProduct);
+      if (change.action) {
+        // Milestone 5D-B: Supabase when connected, localStorage when offline.
+        const audit = await SupabaseBridge.writeAuditLog({
+          action: change.action,
+          entity: 'Product',
+          entityId: updatedProduct.id,
+          details: change.details,
+          userName: currentUser?.name || 'Staff',
+          userRole: currentUser?.role || 'ADMIN',
+          userId: currentUser?.id,
+        });
+        if (!audit.success) {
+          console.error('[audit] PRODUCT change not recorded:', audit.error);
+          onAuditWarning?.(audit.error || 'Unknown error.');
+        }
+      }
+      setIsSaving(false);
     } else {
       const newProduct: Product = {
         id: `prod-${Date.now()}`,
@@ -849,18 +998,29 @@ const AddEditProductModal: React.FC<AddEditProductModalProps> = ({
         updatedAt: now,
       };
 
-      await SupabaseBridge.saveProduct(newProduct);
-      storage.addAuditLog({
-        id: `aud-${Date.now()}`,
-        userId: currentUser?.id || 'admin',
-        userName: currentUser?.name || 'Staff',
-        userRole: currentUser?.role || 'ADMIN',
+      setIsSaving(true);
+      const saveRes = await SupabaseBridge.saveProduct(newProduct);
+      if (!saveRes.success) {
+        setIsSaving(false);
+        setError(saveRes.error || 'The product could not be created. Nothing was saved.');
+        return;
+      }
+
+      // Milestone 5D-B: Supabase when connected, localStorage when offline.
+      const audit = await SupabaseBridge.writeAuditLog({
         action: 'PRODUCT_CREATED',
         entity: 'Product',
         entityId: newProduct.id,
         details: `Created new product ${newProduct.name} (${newProduct.sku}) in category ${categoryId}`,
-        createdAt: now,
+        userName: currentUser?.name || 'Staff',
+        userRole: currentUser?.role || 'ADMIN',
+        userId: currentUser?.id,
       });
+      if (!audit.success) {
+        console.error('[audit] PRODUCT_CREATED not recorded:', audit.error);
+        onAuditWarning?.(audit.error || 'Unknown error.');
+      }
+      setIsSaving(false);
     }
 
     onSuccess();
@@ -947,7 +1107,6 @@ const AddEditProductModal: React.FC<AddEditProductModalProps> = ({
                 placeholder="e.g. Apple, Oraimo, Anker, Baseus"
                 value={brand}
                 onChange={(e) => setBrand(e.target.value)}
-                required
                 className="w-full bg-slate-800/90 border border-slate-700/80 rounded-xl px-3 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-hidden focus:border-emerald-500"
               />
             </div>
@@ -960,7 +1119,6 @@ const AddEditProductModal: React.FC<AddEditProductModalProps> = ({
                 placeholder="e.g. FreePods 4, A20i, MagSafe 20W"
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
-                required
                 className="w-full bg-slate-800/90 border border-slate-700/80 rounded-xl px-3 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-hidden focus:border-emerald-500"
               />
             </div>
@@ -1111,10 +1269,11 @@ const AddEditProductModal: React.FC<AddEditProductModalProps> = ({
             </button>
             <button
               type="submit"
-              className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-emerald-900/30 transition-all cursor-pointer flex items-center gap-2"
+              disabled={isSaving}
+              className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 disabled:cursor-not-allowed text-white rounded-xl text-xs font-semibold shadow-lg shadow-emerald-900/30 transition-all cursor-pointer flex items-center gap-2"
             >
               <Package className="w-4 h-4" />
-              <span>{isEditing ? 'Save Changes' : 'Create Product'}</span>
+              <span>{isSaving ? 'Saving...' : isEditing ? 'Save Changes' : 'Create Product'}</span>
             </button>
           </div>
         </form>
@@ -1133,6 +1292,7 @@ interface CategoryManagerModalProps {
   onSuccess: () => void;
   categories: Category[];
   products: Product[];
+  onAuditWarning?: (reason: string) => void;
 }
 
 const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
@@ -1141,6 +1301,7 @@ const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
   onSuccess,
   categories,
   products,
+  onAuditWarning,
 }) => {
   const { currentUser, isAdmin } = useAuth();
   const [newCatName, setNewCatName] = useState('');
@@ -1163,17 +1324,21 @@ const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
     };
 
     await SupabaseBridge.saveCategory(newCat);
-    storage.addAuditLog({
-      id: `aud-${Date.now()}`,
-      userId: currentUser?.id || 'admin',
-      userName: currentUser?.name || 'Staff',
-      userRole: currentUser?.role || 'ADMIN',
+
+    // Milestone 5D-B: Supabase when connected, localStorage when offline.
+    const audit = await SupabaseBridge.writeAuditLog({
       action: 'CATEGORY_CREATED',
       entity: 'Category',
       entityId: newCat.id,
       details: `Created new accessory category "${newCat.name}"`,
-      createdAt: new Date().toISOString(),
+      userName: currentUser?.name || 'Staff',
+      userRole: currentUser?.role || 'ADMIN',
+      userId: currentUser?.id,
     });
+    if (!audit.success) {
+      console.error('[audit] CATEGORY_CREATED not recorded:', audit.error);
+      onAuditWarning?.(audit.error || 'Unknown error.');
+    }
 
     setNewCatName('');
     setNewCatDesc('');
