@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import { User, Store, Role, UserProfile } from '../types';
 import { storage } from '../db/storageEngine';
 import { supabase, isSupabaseConfigured } from '../db/supabase';
+import { SupabaseBridge } from '../db/supabaseBridge';
 
 interface AuthContextType {
   currentUser: User | null;
@@ -101,12 +102,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
    * Refresh all user data and synchronize stores
    */
   const refreshUserData = async () => {
-    const updatedUsers = storage.getUsers();
-    const updatedStores = storage.getStores();
-    setUsers(updatedUsers);
-    setStores(updatedStores);
-
     if (isSupabaseActive && supabase) {
+      const [{ stores: dbStores }, { users: dbUsers }] = await Promise.all([
+        SupabaseBridge.fetchStores(),
+        SupabaseBridge.fetchUsers()
+      ]);
+      if (dbStores) setStores(dbStores);
+      if (dbUsers) setUsers(dbUsers);
+
       const { data: { session } } = await supabase.auth.getSession();
       if (session?.user) {
         const profile = await fetchSupabaseProfile(session.user.id, session.user.email);
@@ -122,6 +125,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
     } else {
       // In local mode, fall back to storage current user
+      setUsers(storage.getUsers());
+      setStores(storage.getStores());
       const localUser = storage.getCurrentUser();
       if (localUser) {
         setCurrentUser(localUser);
@@ -141,6 +146,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       try {
         if (isSupabaseActive && supabase) {
+          const [{ stores: dbStores }, { users: dbUsers }] = await Promise.all([
+            SupabaseBridge.fetchStores(),
+            SupabaseBridge.fetchUsers()
+          ]);
+          if (isMounted) {
+            if (dbStores) setStores(dbStores);
+            if (dbUsers) setUsers(dbUsers);
+          }
+
           // 1. Get current active session
           const { data: { session }, error: sessionError } = await supabase.auth.getSession();
 
@@ -198,9 +212,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           };
         } else {
           // Fallback demo/local storage mode when Supabase is not configured
-          const localUser = storage.getCurrentUser();
           if (isMounted) {
-            setCurrentUser(localUser);
+            setUsers(storage.getUsers());
+            setStores(storage.getStores());
+            const localUser = storage.getCurrentUser();
+            if (localUser) {
+              setCurrentUser(localUser);
+            }
           }
         }
       } catch (err: any) {

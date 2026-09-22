@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 
 export const LoginPage: React.FC = () => {
-  const { signInWithEmail, signUpWithEmail, isSupabaseActive, authError, users } = useAuth();
+  const { signInWithEmail, signUpWithEmail, isSupabaseActive, authError } = useAuth();
   const [isSignUp, setIsSignUp] = useState(false);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -82,16 +82,27 @@ export const LoginPage: React.FC = () => {
     }
   };
 
-  const handleFillDemo = (demoEmail: string) => {
+  // Milestone 5C-fix: UI-only role selection shortcuts, restored.
+  // Static by necessity — RLS correctly hides public.profiles from signed-out
+  // visitors, so button visibility must never depend on a profiles query.
+  // These pre-fill the form only; real authentication still goes through
+  // Supabase Auth, and the ADMIN/ATTENDANT role still comes from
+  // public.profiles after sign-in.
+  const handleSelectAdmin = () => {
     setIsSignUp(false);
-    setEmail(demoEmail);
-    setPassword('StockFlow2026!');
+    setEmail('mypiusezika@gmail.com');
     setLocalError(null);
     setSuccessMessage(null);
   };
 
-  const adminDemo = users.find((u) => u.role === 'ADMIN');
-  const attendantDemo = users.find((u) => u.role === 'ATTENDANT');
+  const handleSelectSalesAgent = () => {
+    // Switches to the Sign-In form without pre-filling any demo email.
+    setIsSignUp(false);
+    setEmail('');
+    setPassword('');
+    setLocalError(null);
+    setSuccessMessage(null);
+  };
 
   return (
     <div className="min-h-screen bg-slate-950 flex flex-col justify-center py-12 sm:px-6 lg:px-8 relative overflow-hidden selection:bg-emerald-500 selection:text-white">
@@ -288,33 +299,29 @@ export const LoginPage: React.FC = () => {
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              {adminDemo && (
-                <button
-                  type="button"
-                  onClick={() => handleFillDemo(adminDemo.email)}
-                  className="text-left p-2.5 rounded-xl bg-slate-950 border border-slate-800 hover:border-indigo-500/50 hover:bg-indigo-950/20 transition-all group"
-                >
-                  <div className="flex items-center gap-1.5 text-xs font-semibold text-indigo-300 group-hover:text-indigo-200">
-                    <ShieldCheck className="w-3.5 h-3.5" />
-                    <span>Super Admin</span>
-                  </div>
-                  <div className="text-[11px] text-slate-400 truncate mt-0.5">{adminDemo.email}</div>
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={handleSelectAdmin}
+                className="text-left p-2.5 rounded-xl bg-slate-950 border border-slate-800 hover:border-indigo-500/50 hover:bg-indigo-950/20 transition-all group"
+              >
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-indigo-300 group-hover:text-indigo-200">
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  <span>Super Admin</span>
+                </div>
+                <div className="text-[11px] text-slate-400 truncate mt-0.5">mypiusezika@gmail.com</div>
+              </button>
 
-              {attendantDemo && (
-                <button
-                  type="button"
-                  onClick={() => handleFillDemo(attendantDemo.email)}
-                  className="text-left p-2.5 rounded-xl bg-slate-950 border border-slate-800 hover:border-emerald-500/50 hover:bg-emerald-950/20 transition-all group"
-                >
-                  <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-300 group-hover:text-emerald-200">
-                    <Store className="w-3.5 h-3.5" />
-                    <span>Attendant (Ikeja)</span>
-                  </div>
-                  <div className="text-[11px] text-slate-400 truncate mt-0.5">{attendantDemo.email}</div>
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={handleSelectSalesAgent}
+                className="text-left p-2.5 rounded-xl bg-slate-950 border border-slate-800 hover:border-emerald-500/50 hover:bg-emerald-950/20 transition-all group"
+              >
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-300 group-hover:text-emerald-200">
+                  <Store className="w-3.5 h-3.5" />
+                  <span>Sales Agent</span>
+                </div>
+                <div className="text-[11px] text-slate-400 truncate mt-0.5">Use your Supabase credentials</div>
+              </button>
             </div>
 
             <div className="flex items-start gap-2 p-2.5 rounded-lg bg-slate-950 border border-slate-800/80 text-[11px] text-slate-400">

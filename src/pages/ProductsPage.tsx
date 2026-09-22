@@ -1,7 +1,8 @@
 import React, { useState, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { Product, Category, ProductStatus } from '../types';
+import { Product, Category, ProductStatus, StoreInventory } from '../types';
 import { storage } from '../db/storageEngine';
+import { SupabaseBridge } from '../db/supabaseBridge';
 import { formatNaira } from '../utils/currency';
 import { StockAdjustmentModal } from '../components/inventory/StockAdjustmentModal';
 import {
@@ -31,9 +32,11 @@ export const ProductsPage: React.FC = () => {
   const { currentUser, currentStore, isAdmin, stores } = useAuth();
 
   // Storage data state
-  const [products, setProducts] = useState<Product[]>(() => storage.getProducts());
-  const [categories, setCategories] = useState<Category[]>(() => storage.getCategories());
-  const [inventory] = useState(() => storage.getInventory());
+  const [products, setProducts] = useState<Product[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [inventory, setInventory] = useState<StoreInventory[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   // Search & Filter state
   const [searchQuery, setSearchQuery] = useState('');
@@ -54,10 +57,37 @@ export const ProductsPage: React.FC = () => {
   const [isAdjustModalOpen, setIsAdjustModalOpen] = useState(false);
   const [adjustProductId, setAdjustProductId] = useState<string>('');
 
+  const loadData = async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const [prodRes, catRes, invRes] = await Promise.all([
+        SupabaseBridge.fetchProducts({ includeInactive: true }),
+        SupabaseBridge.fetchCategories(),
+        SupabaseBridge.fetchInventory()
+      ]);
+
+      if (!prodRes.success) throw new Error(prodRes.error);
+      if (!catRes.success) throw new Error(catRes.error);
+      if (!invRes.success) throw new Error(invRes.error);
+
+      setProducts(prodRes.products || []);
+      setCategories(catRes.categories as Category[] || []);
+      setInventory(invRes.inventory || []);
+    } catch (err: any) {
+      setError(err.message || 'Failed to load catalog data');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  React.useEffect(() => {
+    loadData();
+  }, []);
+
   // Refresh handler
   const refreshData = () => {
-    setProducts(storage.getProducts());
-    setCategories(storage.getCategories());
+    loadData();
   };
 
   // Distinct Brands
@@ -68,13 +98,12 @@ export const ProductsPage: React.FC = () => {
 
   // Aggregate stock counts per product
   const productStockMap = useMemo(() => {
-    const currentInv = storage.getInventory();
     const map = new Map<string, { total: number; storeStock: number }>();
 
     for (const p of products) {
       let total = 0;
       let storeStock = 0;
-      for (const item of currentInv) {
+      for (const item of inventory) {
         if (item.productId === p.id) {
           total += item.quantity;
           if (currentStore && item.storeId === currentStore.id) {
@@ -160,7 +189,7 @@ export const ProductsPage: React.FC = () => {
   };
 
   // Handle deactivate/toggle status
-  const handleToggleProductStatus = (product: Product) => {
+  const handleToggleProductStatus = async (product: Product) => {
     if (!isAdmin) return;
     const nextStatus: ProductStatus = product.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
     const updated: Product = {
@@ -168,7 +197,7 @@ export const ProductsPage: React.FC = () => {
       status: nextStatus,
       updatedAt: new Date().toISOString(),
     };
-    storage.saveProduct(updated);
+    await SupabaseBridge.saveProduct(updated);
     storage.addAuditLog({
       id: `aud-${Date.now()}`,
       userId: currentUser?.id || 'admin',
@@ -182,6 +211,32 @@ export const ProductsPage: React.FC = () => {
     });
     refreshData();
   };
+
+  if (isLoading) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64 space-y-4">
+        <div className="w-8 h-8 border-4 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
+        <p className="text-slate-400 text-sm font-medium">Loading catalog data...</p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64 space-y-4">
+        <div className="p-3 bg-rose-500/10 rounded-full">
+          <AlertCircle className="w-8 h-8 text-rose-500" />
+        </div>
+        <p className="text-rose-400 text-sm font-medium">{error}</p>
+        <button
+          onClick={loadData}
+          className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg text-xs transition-colors"
+        >
+          Try Again
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -722,7 +777,7 @@ const AddEditProductModal: React.FC<AddEditProductModalProps> = ({
     setBarcode(randomBarcode);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
 
@@ -763,7 +818,7 @@ const AddEditProductModal: React.FC<AddEditProductModalProps> = ({
         updatedAt: now,
       };
 
-      storage.saveProduct(updatedProduct);
+      await SupabaseBridge.saveProduct(updatedProduct);
       storage.addAuditLog({
         id: `aud-${Date.now()}`,
         userId: currentUser?.id || 'admin',
@@ -794,7 +849,7 @@ const AddEditProductModal: React.FC<AddEditProductModalProps> = ({
         updatedAt: now,
       };
 
-      storage.saveProduct(newProduct);
+      await SupabaseBridge.saveProduct(newProduct);
       storage.addAuditLog({
         id: `aud-${Date.now()}`,
         userId: currentUser?.id || 'admin',
@@ -1092,7 +1147,7 @@ const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
   const [newCatDesc, setNewCatDesc] = useState('');
   const [error, setError] = useState('');
 
-  const handleAddCategory = (e: React.FormEvent) => {
+  const handleAddCategory = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!isAdmin) return;
     if (!newCatName.trim()) {
@@ -1107,7 +1162,7 @@ const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
       createdAt: new Date().toISOString(),
     };
 
-    storage.saveCategory(newCat);
+    await SupabaseBridge.saveCategory(newCat);
     storage.addAuditLog({
       id: `aud-${Date.now()}`,
       userId: currentUser?.id || 'admin',

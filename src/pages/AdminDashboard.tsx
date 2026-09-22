@@ -1,8 +1,15 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { formatNaira } from '../utils/currency';
 import { storage } from '../db/storageEngine';
+import { SupabaseBridge } from '../db/supabaseBridge';
 import {
+  computeAdminDashboardAnalytics,
+  computeStoreDetailAnalytics,
+  AnalyticsDataset,
+} from '../db/analyticsEngine';
+import {
+  AdminDashboardAnalytics,
   DateRangePreset,
   DateRangeFilter,
   Sale,
@@ -111,14 +118,59 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     return { preset: selectedPreset };
   }, [selectedPreset, appliedCustomDates]);
 
-  // Execute live analytics query through StorageEngine
-  const analyticsData = useMemo(() => {
+  // Milestone 5C: Supabase dataset + computed analytics (offline fallback retained)
+  const [dataset, setDataset] = useState<AnalyticsDataset | null>(null);
+  const [analyticsData, setAnalyticsData] = useState<AdminDashboardAnalytics | null>(null);
+  const [isLoadingAnalytics, setIsLoadingAnalytics] = useState<boolean>(true);
+  const [analyticsError, setAnalyticsError] = useState<string | null>(null);
+
+  const loadAnalytics = async () => {
+    if (!currentUser) return;
+
+    setIsLoadingAnalytics(true);
+    setAnalyticsError(null);
+
     try {
-      return storage.getAdminDashboardAnalytics(currentUser, currentFilter, storeFilter);
-    } catch (err) {
+      if (SupabaseBridge.isConnected()) {
+        const [salesRes, productsRes, inventoryRes, categoriesRes, storesRes] = await Promise.all([
+          SupabaseBridge.fetchSales({ limit: 1000 }),
+          SupabaseBridge.fetchProducts({ includeInactive: true }),
+          SupabaseBridge.fetchInventory(),
+          SupabaseBridge.fetchCategories(),
+          SupabaseBridge.fetchStores(),
+        ]);
+
+        if (!salesRes.success) throw new Error(`Sales: ${salesRes.error}`);
+        if (!productsRes.success) throw new Error(`Products: ${productsRes.error}`);
+        if (!inventoryRes.success) throw new Error(`Inventory: ${inventoryRes.error}`);
+        if (!categoriesRes.success) throw new Error(`Categories: ${categoriesRes.error}`);
+        if (!storesRes.success) throw new Error(`Stores: ${storesRes.error}`);
+
+        const ds: AnalyticsDataset = {
+          sales: salesRes.sales || [],
+          products: productsRes.products || [],
+          inventory: inventoryRes.inventory || [],
+          categories: categoriesRes.categories || [],
+          stores: storesRes.stores || [],
+        };
+        setDataset(ds);
+        setAnalyticsData(computeAdminDashboardAnalytics(ds, currentFilter, storeFilter));
+      } else {
+        // Fallback for offline demo mode
+        setDataset(null);
+        setAnalyticsData(storage.getAdminDashboardAnalytics(currentUser, currentFilter, storeFilter));
+      }
+    } catch (err: any) {
       console.error('Failed to calculate analytics:', err);
-      return null;
+      setAnalyticsError(err?.message || 'Failed to compute dashboard analytics.');
+      setAnalyticsData(null);
     }
+
+    setIsLoadingAnalytics(false);
+  };
+
+  useEffect(() => {
+    loadAnalytics();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser, currentFilter, storeFilter, refreshKey]);
 
@@ -130,8 +182,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const handleOpenStoreDetail = (storeId: string) => {
     try {
-      const detail = storage.getStoreDetailAnalytics(currentUser, storeId);
-      setSelectedStoreDetail(detail);
+      if (SupabaseBridge.isConnected() && dataset) {
+        const detail = computeStoreDetailAnalytics(dataset, storeId);
+        setSelectedStoreDetail(detail);
+      } else {
+        const detail = storage.getStoreDetailAnalytics(currentUser, storeId);
+        setSelectedStoreDetail(detail);
+      }
     } catch (err) {
       console.error('Error loading store detail:', err);
     }
@@ -152,7 +209,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
-  if (!analyticsData) {
+  // Milestone 5C: error gate (strict Supabase mode, no seed fallback)
+  if (analyticsError) {
+    return (
+      <div className="p-8 max-w-2xl mx-auto my-12 bg-slate-900 border border-rose-800/50 rounded-2xl text-center space-y-4 shadow-2xl">
+        <ShieldAlert className="w-8 h-8 text-rose-400 mx-auto" />
+        <h2 className="text-xl font-black text-white">Could not load dashboard analytics</h2>
+        <p className="text-xs text-slate-400">{analyticsError}</p>
+        <div className="pt-2">
+          <button
+            onClick={loadAnalytics}
+            className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-lg shadow-indigo-900/30"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!analyticsData || isLoadingAnalytics) {
     return (
       <div className="p-8 text-center text-slate-400 bg-slate-900 rounded-2xl border border-slate-800">
         Loading executive business analytics...

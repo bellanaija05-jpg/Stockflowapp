@@ -21,6 +21,7 @@ import {
   Layers,
   Filter,
   X,
+  Loader2,
 } from 'lucide-react';
 
 export const POSPage: React.FC = () => {
@@ -57,6 +58,8 @@ export const POSPage: React.FC = () => {
   const [products, setProducts] = useState<Product[]>([]);
   const [inventoryList, setInventoryList] = useState<any[]>([]);
   const [recentSales, setRecentSales] = useState<Sale[]>([]);
+  const [isLoadingProducts, setIsLoadingProducts] = useState<boolean>(false);
+  const [productLoadError, setProductLoadError] = useState<string | null>(null);
 
   // Cart State
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -81,18 +84,52 @@ export const POSPage: React.FC = () => {
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   // Load data for active store
-  const refreshData = () => {
-    const allProducts = storage.getProducts().filter((p) => p.status === 'ACTIVE');
-    const storeStock = storage.getInventory().filter((inv) => inv.storeId === selectedStoreId);
-    const storeSales = storage.getSalesByStore(selectedStoreId);
+  const loadData = async () => {
+    setIsLoadingProducts(true);
+    setProductLoadError(null);
 
-    setProducts(allProducts);
-    setInventoryList(storeStock);
-    setRecentSales(storeSales.slice(0, 8)); // Top 8 recent sales
+    if (SupabaseBridge.isConnected()) {
+      const [productsResult, inventoryResult, salesResult] = await Promise.all([
+        SupabaseBridge.fetchProducts(),
+        SupabaseBridge.fetchInventory(selectedStoreId),
+        SupabaseBridge.fetchSales({ storeId: selectedStoreId, limit: 8 }),
+      ]);
+
+      if (!productsResult.success) {
+        setProductLoadError(`Failed to load products: ${productsResult.error}`);
+        setIsLoadingProducts(false);
+        return;
+      }
+      if (!inventoryResult.success) {
+        setProductLoadError(`Failed to load inventory: ${inventoryResult.error}`);
+        setIsLoadingProducts(false);
+        return;
+      }
+
+      // Milestone 5C: recent sales now come from Supabase too. A sales-fetch
+      // failure is non-blocking for the catalog — keep the current list.
+      if (salesResult.success) {
+        setRecentSales(salesResult.sales || []);
+      }
+
+      setProducts(productsResult.products || []);
+      setInventoryList(inventoryResult.inventory || []);
+    } else {
+      // Fallback for offline demo mode
+      const allProducts = storage.getProducts().filter((p) => p.status === 'ACTIVE');
+      const storeStock = storage.getInventory().filter((inv) => inv.storeId === selectedStoreId);
+      const storeSales = storage.getSalesByStore(selectedStoreId);
+
+      setProducts(allProducts);
+      setInventoryList(storeStock);
+      setRecentSales(storeSales.slice(0, 8)); // Top 8 recent sales
+    }
+
+    setIsLoadingProducts(false);
   };
 
   useEffect(() => {
-    refreshData();
+    loadData();
     // Whenever store changes, clear or adjust cart
     setCart([]);
     setCheckoutError(null);
@@ -324,10 +361,35 @@ export const POSPage: React.FC = () => {
       setDiscount(0);
 
       // Refresh store inventory & recent sales
-      refreshData();
+      loadData();
+
+      // Reconstruct full Sale object to prevent ReceiptModal crash
+      const completeSale: Sale = {
+        id: result.sale.saleId,
+        transactionNumber: result.sale.transactionNumber,
+        storeId: selectedStoreId,
+        attendantId: currentUser.id,
+        attendantName: currentUser.name,
+        subtotal: result.sale.subtotal,
+        discount: result.sale.discount,
+        total: result.sale.total,
+        paymentMethod: paymentMethod,
+        status: 'COMPLETED',
+        createdAt: new Date().toISOString(),
+        items: cart.map(item => ({
+          id: `tmp-${Date.now()}-${item.product.id}`,
+          saleId: result.sale.saleId,
+          productId: item.product.id,
+          productName: item.product.name,
+          sku: item.product.sku,
+          quantity: item.quantity,
+          unitPrice: item.product.sellingPrice,
+          lineTotal: item.quantity * item.product.sellingPrice
+        }))
+      };
 
       // Show receipt modal
-      setActiveReceipt(result.sale);
+      setActiveReceipt(completeSale);
     } else {
       setCheckoutError(result.error || 'Checkout failed. Please try again.');
     }
@@ -391,11 +453,12 @@ export const POSPage: React.FC = () => {
 
           <button
             id="refresh-stock-btn"
-            onClick={refreshData}
-            className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors border border-slate-700"
+            onClick={loadData}
+            disabled={isLoadingProducts}
+            className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors border border-slate-700 disabled:opacity-50"
             title="Refresh stock and inventory"
           >
-            <RefreshCw className="w-4 h-4" />
+            <RefreshCw className={`w-4 h-4 ${isLoadingProducts ? 'animate-spin' : ''}`} />
           </button>
         </div>
       </div>
@@ -519,7 +582,26 @@ export const POSPage: React.FC = () => {
               </span>
             </div>
 
-            {filteredProducts.length === 0 ? (
+            {isLoadingProducts ? (
+              <div className="py-16 flex flex-col items-center justify-center text-slate-500 space-y-4">
+                <Loader2 className="w-8 h-8 animate-spin text-emerald-500" />
+                <p className="text-sm font-medium text-slate-400">Loading catalog from database...</p>
+              </div>
+            ) : productLoadError ? (
+              <div className="py-12 px-4 text-center">
+                <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-rose-500/10 mb-4">
+                  <AlertCircle className="w-6 h-6 text-rose-400" />
+                </div>
+                <p className="text-sm font-bold text-rose-400 mb-2">Error Loading Catalog</p>
+                <p className="text-xs text-slate-400 max-w-sm mx-auto">{productLoadError}</p>
+                <button
+                  onClick={loadData}
+                  className="mt-4 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-lg transition-colors"
+                >
+                  Try Again
+                </button>
+              </div>
+            ) : filteredProducts.length === 0 ? (
               <div className="py-12 text-center text-slate-500">
                 <p className="text-sm font-medium text-slate-400">No products found</p>
                 <p className="text-xs text-slate-600 mt-1">

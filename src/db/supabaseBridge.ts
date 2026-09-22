@@ -3,6 +3,14 @@ import { storage } from './storageEngine';
 import {
   StoreInventory,
   PaymentMethod,
+  Product,
+  Sale,
+  Store,
+  AuditAction,
+  AuditLog,
+  User,
+  Category,
+  InventoryMovement,
 } from '../types';
 
 /**
@@ -132,5 +140,481 @@ export class SupabaseBridge {
       paymentMethod: params.paymentMethod,
       discount: params.discount,
     });
+  }
+
+  /**
+   * Fetch all active products from Supabase
+   */
+  public static async fetchProducts(opts?: { includeInactive?: boolean }): Promise<{ success: boolean; products?: Product[]; error?: string }> {
+    if (!this.isConnected() || !supabase) {
+      return { success: false, error: 'Supabase is not configured or not connected.' };
+    }
+
+    try {
+      let query = supabase.from('products').select('*');
+      if (!opts?.includeInactive) {
+        query = query.eq('status', 'ACTIVE');
+      }
+      const { data, error } = await query;
+
+      if (error) {
+        return { success: false, error: error.message };
+      }
+
+      const products: Product[] = data.map((p: any) => ({
+        id: p.id,
+        name: p.name,
+        sku: p.sku,
+        barcode: p.barcode || '',
+        categoryId: p.category_id,
+        brand: p.name.split(' ')[0] || '', // Simple fallback, brand is not in DB schema currently
+        model: '',
+        costPrice: p.cost_price,
+        sellingPrice: p.selling_price,
+        reorderLevel: p.reorder_level,
+        status: p.status,
+        createdAt: p.created_at,
+        updatedAt: p.updated_at,
+      }));
+
+      return { success: true, products };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Failed to fetch products' };
+    }
+  }
+
+  /**
+   * Fetch inventory for a specific store from Supabase
+   */
+  public static async fetchInventory(storeId?: string): Promise<{ success: boolean; inventory?: StoreInventory[]; error?: string }> {
+    if (!this.isConnected() || !supabase) {
+      return { success: false, error: 'Supabase is not configured or not connected.' };
+    }
+
+    try {
+      let query = supabase.from('inventory').select('*');
+      if (storeId) {
+        query = query.eq('store_id', storeId);
+      }
+      const { data, error } = await query;
+
+      if (error) {
+        return { success: false, error: error.message };
+      }
+
+      const inventory: StoreInventory[] = data.map((inv: any) => ({
+        id: inv.id,
+        productId: inv.product_id,
+        storeId: inv.store_id,
+        quantity: inv.quantity,
+        updatedAt: inv.updated_at,
+      }));
+
+      return { success: true, inventory };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Failed to fetch inventory' };
+    }
+  }
+
+  /**
+   * Fetch categories readable by the authenticated user.
+   */
+  public static async fetchCategories(): Promise<{ success: boolean; categories?: { id: string; name: string; description?: string; createdAt: string }[]; error?: string }> {
+    if (!this.isConnected() || !supabase) {
+      return { success: false, error: 'Supabase is not configured or not connected.' };
+    }
+
+    try {
+      const { data, error } = await supabase.from('categories').select('*').order('name');
+      if (error) {
+        return { success: false, error: error.message };
+      }
+
+      const categories = data.map((c: any) => ({
+        id: c.id,
+        name: c.name,
+        description: c.description || undefined,
+        createdAt: c.created_at,
+      }));
+
+      return { success: true, categories };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Failed to fetch categories' };
+    }
+  }
+
+  /**
+   * Fetch stores visible to the authenticated user.
+   * RLS: "Anyone authenticated can view active stores" — all authenticated users.
+   */
+  public static async fetchStores(): Promise<{ success: boolean; stores?: Store[]; error?: string }> {
+    if (!this.isConnected() || !supabase) {
+      return { success: false, error: 'Supabase is not configured or not connected.' };
+    }
+
+    try {
+      const { data, error } = await supabase.from('stores').select('*').order('name');
+      if (error) {
+        return { success: false, error: error.message };
+      }
+
+      const stores: Store[] = data.map((s: any) => ({
+        id: s.id,
+        name: s.name,
+        location: s.location,
+        phone: s.phone,
+        status: s.status,
+        createdAt: s.created_at,
+        updatedAt: s.updated_at,
+      }));
+
+      return { success: true, stores };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Failed to fetch stores' };
+    }
+  }
+
+  /**
+   * Fetch sales (with nested sale_items) readable by the current user.
+   * RLS "Read sales restricted by store" transparently scopes Attendants to
+   * their assigned branch while Admins can read across all stores.
+   */
+  public static async fetchSales(opts?: { storeId?: string; limit?: number }): Promise<{ success: boolean; sales?: Sale[]; error?: string }> {
+    if (!this.isConnected() || !supabase) {
+      return { success: false, error: 'Supabase is not configured or not connected.' };
+    }
+
+    try {
+      let query = supabase
+        .from('sales')
+        .select('*, sale_items(*)')
+        .order('created_at', { ascending: false })
+        .limit(opts?.limit ?? 500);
+
+      if (opts?.storeId) {
+        query = query.eq('store_id', opts.storeId);
+      }
+
+      const { data, error } = await query;
+      if (error) {
+        return { success: false, error: error.message };
+      }
+
+      const sales: Sale[] = data.map((s: any) => ({
+        id: s.id,
+        transactionNumber: s.transaction_number,
+        storeId: s.store_id,
+        attendantId: s.attendant_id || '',
+        attendantName: s.attendant_name,
+        items: (s.sale_items || []).map((it: any) => ({
+          id: it.id,
+          productId: it.product_id,
+          productName: it.product_name,
+          sku: it.sku,
+          quantity: it.quantity,
+          unitPrice: Number(it.unit_price),
+          lineTotal: Number(it.line_total),
+        })),
+        subtotal: Number(s.subtotal),
+        discount: Number(s.discount),
+        total: Number(s.total),
+        paymentMethod: s.payment_method as PaymentMethod,
+        // DB uses 'VOIDED'; the UI TransactionStatus union uses 'CANCELLED'.
+        status: (s.status === 'VOIDED' ? 'CANCELLED' : s.status) as Sale['status'],
+        createdAt: s.created_at,
+      }));
+
+      return { success: true, sales };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Failed to fetch sales' };
+    }
+  }
+
+  /**
+   * Fetch audit logs readable by the current user.
+   * Requires the "Super Admins can read audit logs" SELECT policy (Milestone 5C).
+   */
+  public static async fetchAuditLogs(limit: number = 500): Promise<{ success: boolean; logs?: AuditLog[]; error?: string }> {
+    if (!this.isConnected() || !supabase) {
+      return { success: false, error: 'Supabase is not configured or not connected.' };
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from('audit_logs')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(limit);
+
+      if (error) {
+        return { success: false, error: error.message };
+      }
+
+      const logs: AuditLog[] = data.map((l: any) => ({
+        id: l.id,
+        userId: l.user_id || '',
+        userName: l.user_name,
+        userRole: l.user_role,
+        action: l.action as AuditAction,
+        entity: l.entity,
+        entityId: l.entity_id,
+        // DB stores JSONB; the UI AuditLog.details is a display string.
+        details: typeof l.details === 'string' ? l.details : JSON.stringify(l.details ?? ''),
+        createdAt: l.created_at,
+      }));
+
+      return { success: true, logs };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Failed to fetch audit logs' };
+    }
+  }
+
+  /**
+   * Fetch all user profiles from Supabase.
+   */
+  public static async fetchUsers(): Promise<{ success: boolean; users?: User[]; error?: string }> {
+    if (!this.isConnected() || !supabase) {
+      return { success: false, error: 'Supabase is not configured or not connected.' };
+    }
+
+    try {
+      const { data, error } = await supabase.from('profiles').select('*').order('name');
+      if (error) {
+        return { success: false, error: error.message };
+      }
+
+      const users: User[] = data.map((u: any) => ({
+        id: u.id,
+        name: u.name,
+        email: u.email,
+        role: u.role,
+        assignedStoreId: u.assigned_store_id || undefined,
+        status: u.status,
+        createdAt: u.created_at,
+        updatedAt: u.updated_at,
+      }));
+
+      return { success: true, users };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Failed to fetch users' };
+    }
+  }
+
+  /**
+   * Fetch inventory movements (ledger) from Supabase.
+   */
+  public static async fetchMovements(limit: number = 500): Promise<{ success: boolean; movements?: InventoryMovement[]; error?: string }> {
+    if (!this.isConnected() || !supabase) {
+      return { success: false, error: 'Supabase is not configured or not connected.' };
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from('inventory_movements')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(limit);
+
+      if (error) {
+        return { success: false, error: error.message };
+      }
+
+      // Milestone 5D-A: map only the movement types produced by the
+      // adjust_inventory_stock RPC into the application vocabulary.
+      // Historical/other DB enums (SALE, TRANSFER_IN, TRANSFER_OUT, DAMAGE,
+      // RETURN) pass through unchanged.
+      const mapDbMovementType = (dbType: string): InventoryMovement['movementType'] => {
+        if (dbType === 'PURCHASE') return 'STOCK_IN';
+        if (dbType === 'RECONCILIATION') return 'ADJUSTMENT';
+        return dbType as InventoryMovement['movementType'];
+      };
+
+      const movements: InventoryMovement[] = data.map((m: any) => ({
+        id: m.id,
+        productId: m.product_id,
+        storeId: m.store_id,
+        quantity: m.quantity,
+        movementType: mapDbMovementType(m.movement_type),
+        referenceId: m.reference_id,
+        userId: m.user_id,
+        userName: m.user_name || 'System', // Supabase currently doesn't store user_name in movements by default, but wait, schema does not have user_name in movements table! Let's check schema. Schema doesn't have it.
+        previousQuantity: m.previous_quantity,
+        newQuantity: m.new_quantity,
+        notes: m.notes,
+        createdAt: m.created_at,
+      }));
+
+      return { success: true, movements };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Failed to fetch movements' };
+    }
+  }
+
+  /**
+   * Save a product to Supabase.
+   */
+  public static async saveProduct(product: Product): Promise<{ success: boolean; error?: string }> {
+    if (!this.isConnected() || !supabase) {
+      storage.saveProduct(product);
+      return { success: true };
+    }
+
+    try {
+      const { error } = await supabase.from('products').upsert({
+        id: product.id,
+        name: product.name,
+        sku: product.sku,
+        barcode: product.barcode || null,
+        category_id: product.categoryId,
+        cost_price: product.costPrice,
+        selling_price: product.sellingPrice,
+        reorder_level: product.reorderLevel,
+        status: product.status,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'id' });
+
+      if (error) {
+        return { success: false, error: error.message };
+      }
+
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Failed to save product' };
+    }
+  }
+
+  /**
+   * Save a category to Supabase.
+   */
+  public static async saveCategory(category: Category): Promise<{ success: boolean; error?: string }> {
+    if (!this.isConnected() || !supabase) {
+      storage.saveCategory(category);
+      return { success: true };
+    }
+
+    try {
+      const { error } = await supabase.from('categories').upsert({
+        id: category.id,
+        name: category.name,
+        description: category.description,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'id' });
+
+      if (error) {
+        return { success: false, error: error.message };
+      }
+
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Failed to save category' };
+    }
+  }
+
+  /**
+   * Save a store to Supabase.
+   */
+  public static async saveStore(store: Store): Promise<{ success: boolean; error?: string }> {
+    if (!this.isConnected() || !supabase) {
+      storage.saveStore(store);
+      return { success: true };
+    }
+
+    try {
+      const { error } = await supabase.from('stores').upsert({
+        id: store.id,
+        name: store.name,
+        location: store.location,
+        phone: store.phone,
+        status: store.status,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'id' });
+
+      if (error) {
+        return { success: false, error: error.message };
+      }
+
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Failed to save store' };
+    }
+  }
+
+  /**
+   * Save a user profile to Supabase. Note: Does not create the actual Auth user.
+   */
+  public static async saveProfile(profile: User): Promise<{ success: boolean; error?: string }> {
+    if (!this.isConnected() || !supabase) {
+      storage.saveUser(profile);
+      return { success: true };
+    }
+
+    try {
+      const { error } = await supabase.from('profiles').upsert({
+        id: profile.id,
+        email: profile.email,
+        name: profile.name,
+        role: profile.role,
+        assigned_store_id: profile.assignedStoreId || null,
+        status: profile.status,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'id' });
+
+      if (error) {
+        return { success: false, error: error.message };
+      }
+
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Failed to save profile' };
+    }
+  }
+
+  /**
+   * Execute atomic stock adjustment via RPC.
+   *
+   * Milestone 5D-A: `movementType` uses the application vocabulary
+   * ('STOCK_IN' | 'ADJUSTMENT') and is mapped to the database `movement_type`
+   * enum immediately before the RPC call, because the Postgres enum only
+   * contains ('SALE','PURCHASE','TRANSFER_IN','TRANSFER_OUT','DAMAGE',
+   * 'RECONCILIATION','RETURN') — not STOCK_IN/ADJUSTMENT.
+   */
+  public static async executeAtomicAdjustment(params: {
+    productId: string;
+    storeId: string;
+    newQuantity: number;
+    userId: string;
+    userName: string;
+    userRole: 'ADMIN' | 'ATTENDANT';
+    movementType: 'STOCK_IN' | 'ADJUSTMENT';
+    notes: string;
+  }): Promise<{ success: boolean; error?: string }> {
+    if (!this.isConnected() || !supabase) {
+      // Offline demo mode only — never reachable once connected to Supabase.
+      return storage.adjustStock(params);
+    }
+
+    // Milestone 5D-A: application movement vocabulary → DB movement_type enum.
+    const dbMovementType = params.movementType === 'STOCK_IN' ? 'PURCHASE' : 'RECONCILIATION';
+
+    try {
+      const { error } = await supabase.rpc('adjust_inventory_stock', {
+        p_product_id: params.productId,
+        p_store_id: params.storeId,
+        p_new_quantity: params.newQuantity,
+        p_user_id: params.userId,
+        p_user_name: params.userName,
+        p_user_role: params.userRole,
+        p_movement_type: dbMovementType,
+        p_notes: params.notes,
+      });
+
+      if (error) {
+        return { success: false, error: error.message };
+      }
+
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'RPC Adjustment failed' };
+    }
   }
 }

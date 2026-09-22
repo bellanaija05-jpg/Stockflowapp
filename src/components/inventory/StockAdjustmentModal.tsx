@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
-import { Product, Store } from '../../types';
+import { Product, Store, StoreInventory } from '../../types';
 import { storage } from '../../db/storageEngine';
+import { SupabaseBridge } from '../../db/supabaseBridge';
 import {
   Boxes,
   X,
@@ -12,6 +13,7 @@ import {
   FileText,
   Building2,
   Package,
+  Loader2,
 } from 'lucide-react';
 
 interface StockAdjustmentModalProps {
@@ -41,7 +43,15 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
   initialStoreId,
 }) => {
   const { currentUser, currentStore, isAdmin, stores } = useAuth();
-  const products = storage.getProducts();
+
+  // Milestone 5D-A: in connected (Supabase) mode the catalog and current stock
+  // are authoritative from Supabase; localStorage is used only when offline.
+  const [products, setProducts] = useState<Product[]>(() =>
+    SupabaseBridge.isConnected() ? [] : storage.getProducts()
+  );
+  const [supabaseInventory, setSupabaseInventory] = useState<StoreInventory[] | null>(null);
+  const [isLoadingData, setIsLoadingData] = useState<boolean>(false);
+  const [dataLoadError, setDataLoadError] = useState<string | null>(null);
 
   const [selectedProductId, setSelectedProductId] = useState<string>(
     initialProductId || products[0]?.id || ''
@@ -72,12 +82,59 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
     }
   }, [initialStoreId, isAdmin, currentStore]);
 
+  // Milestone 5D-A: authoritative data load. Runs when the modal opens and
+  // whenever the selected store changes. Offline mode refreshes from localStorage.
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const loadData = async () => {
+      if (!SupabaseBridge.isConnected()) {
+        setProducts(storage.getProducts());
+        setSupabaseInventory(null);
+        setDataLoadError(null);
+        return;
+      }
+
+      setIsLoadingData(true);
+      setDataLoadError(null);
+      try {
+        const inventoryPromise: Promise<{ success: boolean; inventory?: StoreInventory[]; error?: string }> =
+          selectedStoreId
+            ? SupabaseBridge.fetchInventory(selectedStoreId)
+            : Promise.resolve({ success: true, inventory: [] });
+
+        const [productsResult, inventoryResult] = await Promise.all([
+          SupabaseBridge.fetchProducts({ includeInactive: true }),
+          inventoryPromise,
+        ]);
+
+        if (!productsResult.success) throw new Error(productsResult.error || 'Failed to load products.');
+        if (!inventoryResult.success) throw new Error(inventoryResult.error || 'Failed to load current stock.');
+
+        setProducts(productsResult.products || []);
+        setSupabaseInventory(inventoryResult.inventory || []);
+      } catch (err: any) {
+        setDataLoadError(err?.message || 'Failed to load adjustment data from Supabase.');
+      } finally {
+        setIsLoadingData(false);
+      }
+    };
+
+    loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, selectedStoreId]);
+
   const selectedProduct = products.find((p) => p.id === selectedProductId);
   const selectedStore = stores.find((s) => s.id === selectedStoreId);
 
-  // Current stock level in this store
-  const currentQuantity =
-    selectedProductId && selectedStoreId
+  // Current stock level in this store.
+  // Milestone 5D-A: Supabase inventory is authoritative when connected;
+  // localStorage is used only in offline demo mode.
+  const currentQuantity = SupabaseBridge.isConnected()
+    ? supabaseInventory
+      ? supabaseInventory.find((inv) => inv.productId === selectedProductId)?.quantity ?? 0
+      : 0
+    : selectedProductId && selectedStoreId
       ? storage.getStock(selectedProductId, selectedStoreId)
       : 0;
 
@@ -96,7 +153,11 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
     adjustmentMode === 'SET_TOTAL' ? inputValue : currentQuantity + inputValue;
   const quantityDiff = targetQuantity - currentQuantity;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  // Milestone 5D-A: in connected mode, block submission until the
+  // authoritative Supabase stock level has loaded (or surface the load error).
+  const isDataReady = !SupabaseBridge.isConnected() || (supabaseInventory !== null && !dataLoadError);
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
 
@@ -112,31 +173,70 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
       setError('Final stock quantity cannot be negative.');
       return;
     }
+    if (!isDataReady) {
+      setError('Current stock is still loading from Supabase. Please try again.');
+      return;
+    }
 
     setIsSubmitting(true);
 
     const fullReasonNote = `${reasonCategory}${customNotes.trim() ? `: ${customNotes.trim()}` : ''}`;
 
-    const result = storage.adjustStock({
-      productId: selectedProductId,
-      storeId: selectedStoreId,
-      newQuantity: targetQuantity,
-      userId: currentUser?.id || 'admin',
-      userName: currentUser?.name || 'Staff',
-      userRole: currentUser?.role || 'ADMIN',
-      movementType: quantityDiff > 0 && movementType === 'STOCK_IN' ? 'STOCK_IN' : 'ADJUSTMENT',
-      notes: fullReasonNote,
-    });
+    try {
+      if (SupabaseBridge.isConnected()) {
+        // Milestone 5D-A: authenticated adjustments go through the atomic
+        // adjust_inventory_stock RPC. It is the single authoritative write
+        // (inventory + movement + audit log) — no localStorage writes here.
+        if (!currentUser) {
+          setError('Your session has expired. Please sign in again to adjust stock.');
+          setIsSubmitting(false);
+          return;
+        }
 
-    setIsSubmitting(false);
+        const result = await SupabaseBridge.executeAtomicAdjustment({
+          productId: selectedProductId,
+          storeId: selectedStoreId,
+          newQuantity: targetQuantity,
+          userId: currentUser.id,
+          userName: currentUser.name,
+          userRole: currentUser.role,
+          movementType,
+          notes: fullReasonNote,
+        });
 
-    if (!result.success) {
-      setError(result.error || 'Failed to adjust stock.');
-      return;
+        if (!result.success) {
+          // No silent fallback to localStorage in connected mode.
+          setError(result.error || 'The stock adjustment failed. Inventory was not changed.');
+          setIsSubmitting(false);
+          return;
+        }
+      } else {
+        // Offline demo mode only — existing localStorage behavior preserved.
+        const result = storage.adjustStock({
+          productId: selectedProductId,
+          storeId: selectedStoreId,
+          newQuantity: targetQuantity,
+          userId: currentUser?.id || 'admin',
+          userName: currentUser?.name || 'Staff',
+          userRole: currentUser?.role || 'ADMIN',
+          movementType: quantityDiff > 0 && movementType === 'STOCK_IN' ? 'STOCK_IN' : 'ADJUSTMENT',
+          notes: fullReasonNote,
+        });
+
+        if (!result.success) {
+          setError(result.error || 'Failed to adjust stock.');
+          setIsSubmitting(false);
+          return;
+        }
+      }
+
+      setIsSubmitting(false);
+      onSuccess();
+      onClose();
+    } catch (err: any) {
+      setError(err?.message || 'An unexpected error occurred. Inventory was not changed.');
+      setIsSubmitting(false);
     }
-
-    onSuccess();
-    onClose();
   };
 
   return (
@@ -167,6 +267,20 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
             <div className="p-3 bg-rose-500/15 border border-rose-500/30 rounded-xl text-rose-300 text-xs flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
               <span>{error}</span>
+            </div>
+          )}
+
+          {/* Milestone 5D-A: Supabase data-loading states */}
+          {isLoadingData && (
+            <div className="p-3 bg-slate-800/60 border border-slate-700 rounded-xl text-slate-300 text-xs flex items-center gap-2">
+              <Loader2 className="w-4 h-4 shrink-0 animate-spin text-emerald-400" />
+              <span>Loading current stock from Supabase...</span>
+            </div>
+          )}
+          {dataLoadError && (
+            <div className="p-3 bg-rose-500/15 border border-rose-500/30 rounded-xl text-rose-300 text-xs flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+              <span>{dataLoadError}</span>
             </div>
           )}
 
@@ -335,8 +449,8 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
             </button>
             <button
               type="submit"
-              disabled={isSubmitting}
-              className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-emerald-900/30 transition-all cursor-pointer flex items-center gap-2"
+              disabled={isSubmitting || isLoadingData || !isDataReady}
+              className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-emerald-900/30 transition-all cursor-pointer flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Boxes className="w-4 h-4" />
               <span>Confirm Stock Adjustment</span>

@@ -1,6 +1,7 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { StorageEngine } from '../db/storageEngine';
+import { SupabaseBridge } from '../db/supabaseBridge';
 import { PaymentMethod, Sale, Store } from '../types';
 import { formatNaira } from '../utils/currency';
 import { ReceiptModal } from '../components/pos/ReceiptModal';
@@ -20,14 +21,53 @@ import {
   X,
   ChevronRight,
   ShieldCheck,
+  Loader2,
+  AlertTriangle,
 } from 'lucide-react';
 
 export const SalesPage: React.FC = () => {
   const { currentUser } = useAuth();
   const storage = StorageEngine.getInstance();
 
-  const stores = useMemo(() => storage.getStores(), []);
-  const allSales = useMemo(() => storage.getSales(), []);
+  const [stores, setStores] = useState<Store[]>([]);
+  const [allSales, setAllSales] = useState<Sale[]>([]);
+  const [isLoadingSales, setIsLoadingSales] = useState<boolean>(true);
+  const [salesLoadError, setSalesLoadError] = useState<string | null>(null);
+
+  // Milestone 5C: authoritative Supabase reads, strict separation (no seed fallback)
+  const loadSales = async () => {
+    setIsLoadingSales(true);
+    setSalesLoadError(null);
+
+    if (SupabaseBridge.isConnected()) {
+      const [salesResult, storesResult] = await Promise.all([
+        SupabaseBridge.fetchSales({ limit: 1000 }),
+        SupabaseBridge.fetchStores(),
+      ]);
+
+      if (!salesResult.success) {
+        setSalesLoadError(`Failed to load sales: ${salesResult.error}`);
+        setIsLoadingSales(false);
+        return;
+      }
+
+      setAllSales(salesResult.sales || []);
+      if (storesResult.success) {
+        setStores(storesResult.stores || []);
+      }
+    } else {
+      // Fallback for offline demo mode
+      setStores(storage.getStores());
+      setAllSales(storage.getSales());
+    }
+
+    setIsLoadingSales(false);
+  };
+
+  useEffect(() => {
+    loadSales();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Filter States
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -158,6 +198,34 @@ export const SalesPage: React.FC = () => {
         );
     }
   };
+
+  // Milestone 5C: loading / error gates (strict Supabase mode, no seed fallback)
+  if (isLoadingSales) {
+    return (
+      <div id="sales-history-page" className="p-12 bg-slate-900 border border-slate-800 rounded-2xl flex flex-col items-center justify-center gap-3">
+        <Loader2 className="w-8 h-8 text-emerald-400 animate-spin" />
+        <p className="text-sm text-slate-400">Loading sales transactions from Supabase...</p>
+      </div>
+    );
+  }
+
+  if (salesLoadError) {
+    return (
+      <div id="sales-history-page" className="p-8 max-w-2xl mx-auto my-12 bg-slate-900 border border-rose-800/50 rounded-2xl text-center space-y-4 shadow-2xl">
+        <AlertTriangle className="w-8 h-8 text-rose-400 mx-auto" />
+        <h2 className="text-xl font-black text-white">Could not load sales history</h2>
+        <p className="text-xs text-slate-400">{salesLoadError}</p>
+        <div className="pt-2">
+          <button
+            onClick={loadSales}
+            className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-lg shadow-indigo-900/30"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div id="sales-history-page" className="space-y-6">

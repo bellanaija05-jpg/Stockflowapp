@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { Store, StoreStatus } from '../types';
 import { storage } from '../db/storageEngine';
+import { SupabaseBridge } from '../db/supabaseBridge';
 import { AccessDenied } from '../components/common/AccessDenied';
 import {
   Store as StoreIcon,
@@ -79,7 +80,7 @@ export const StoresPage: React.FC<StoresPageProps> = ({ onNavigateHome }) => {
     setIsModalOpen(true);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formData.name.trim()) {
       setErrorMessage('Store name is required.');
@@ -102,7 +103,7 @@ export const StoresPage: React.FC<StoresPageProps> = ({ onNavigateHome }) => {
         status: formData.status,
         updatedAt: now,
       };
-      storage.saveStore(updated);
+      await SupabaseBridge.saveStore(updated);
 
       // Audit Log
       storage.addAuditLog({
@@ -128,7 +129,7 @@ export const StoresPage: React.FC<StoresPageProps> = ({ onNavigateHome }) => {
         createdAt: now,
         updatedAt: now,
       };
-      storage.saveStore(newStore);
+      await SupabaseBridge.saveStore(newStore);
 
       // Audit Log
       storage.addAuditLog({
@@ -144,7 +145,7 @@ export const StoresPage: React.FC<StoresPageProps> = ({ onNavigateHome }) => {
       });
     }
 
-    refreshUserData();
+    await refreshUserData();
     setIsModalOpen(false);
   };
 

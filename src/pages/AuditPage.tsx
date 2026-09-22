@@ -1,6 +1,8 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { storage } from '../db/storageEngine';
+import { SupabaseBridge } from '../db/supabaseBridge';
+import { AuditLog } from '../types';
 import { AccessDenied } from '../components/common/AccessDenied';
 import {
   FileClock,
@@ -9,6 +11,8 @@ import {
   User,
   Calendar,
   Filter,
+  Loader2,
+  AlertTriangle,
 } from 'lucide-react';
 
 interface AuditPageProps {
@@ -19,12 +23,67 @@ export const AuditPage: React.FC<AuditPageProps> = ({ onNavigateHome }) => {
   const { isAdmin } = useAuth();
   const [searchTerm, setSearchTerm] = useState('');
   const [actionFilter, setActionFilter] = useState('ALL');
+  const [allLogs, setAllLogs] = useState<AuditLog[]>([]);
+  const [isLoadingLogs, setIsLoadingLogs] = useState<boolean>(true);
+  const [logsLoadError, setLogsLoadError] = useState<string | null>(null);
+
+  // Milestone 5C: authoritative Supabase reads for the audit trail
+  const loadLogs = async () => {
+    setIsLoadingLogs(true);
+    setLogsLoadError(null);
+
+    if (SupabaseBridge.isConnected()) {
+      const result = await SupabaseBridge.fetchAuditLogs();
+      if (!result.success) {
+        setLogsLoadError(result.error || 'Failed to load audit logs.');
+        setIsLoadingLogs(false);
+        return;
+      }
+      setAllLogs(result.logs || []);
+    } else {
+      // Fallback for offline demo mode
+      setAllLogs(storage.getAuditLogs());
+    }
+
+    setIsLoadingLogs(false);
+  };
+
+  useEffect(() => {
+    loadLogs();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   if (!isAdmin) {
     return <AccessDenied requiredRole="Super Admin" onGoBack={onNavigateHome} />;
   }
 
-  const allLogs = storage.getAuditLogs();
+  // Milestone 5C: loading / error gates (strict Supabase mode, no seed fallback)
+  if (isLoadingLogs) {
+    return (
+      <div className="p-12 bg-slate-900 border border-slate-800 rounded-2xl flex flex-col items-center justify-center gap-3">
+        <Loader2 className="w-8 h-8 text-emerald-400 animate-spin" />
+        <p className="text-sm text-slate-400">Loading audit trail from Supabase...</p>
+      </div>
+    );
+  }
+
+  if (logsLoadError) {
+    return (
+      <div className="p-8 max-w-2xl mx-auto my-12 bg-slate-900 border border-rose-800/50 rounded-2xl text-center space-y-4 shadow-2xl">
+        <AlertTriangle className="w-8 h-8 text-rose-400 mx-auto" />
+        <h2 className="text-xl font-black text-white">Could not load audit trail</h2>
+        <p className="text-xs text-slate-400">{logsLoadError}</p>
+        <div className="pt-2">
+          <button
+            onClick={loadLogs}
+            className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-lg shadow-indigo-900/30"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   const filteredLogs = allLogs.filter((log) => {
     const matchesSearch =

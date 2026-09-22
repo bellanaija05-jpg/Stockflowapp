@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { User, Role, UserStatus } from '../types';
 import { storage } from '../db/storageEngine';
+import { SupabaseBridge } from '../db/supabaseBridge';
 import { AccessDenied } from '../components/common/AccessDenied';
 import {
   Users,
@@ -85,7 +86,7 @@ export const UsersPage: React.FC<UsersPageProps> = ({ onNavigateHome }) => {
     setIsModalOpen(true);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formData.name.trim()) {
       setErrorMessage('Full name is required.');
@@ -108,7 +109,7 @@ export const UsersPage: React.FC<UsersPageProps> = ({ onNavigateHome }) => {
         status: formData.status,
         updatedAt: now,
       };
-      storage.saveUser(updated);
+      await SupabaseBridge.saveProfile(updated);
 
       // Audit Log
       storage.addAuditLog({
@@ -133,7 +134,7 @@ export const UsersPage: React.FC<UsersPageProps> = ({ onNavigateHome }) => {
         createdAt: now,
         updatedAt: now,
       };
-      storage.saveUser(newUser);
+      await SupabaseBridge.saveProfile(newUser);
 
       // Audit Log
       storage.addAuditLog({
@@ -149,7 +150,7 @@ export const UsersPage: React.FC<UsersPageProps> = ({ onNavigateHome }) => {
       });
     }
 
-    refreshUserData();
+    await refreshUserData();
     setIsModalOpen(false);
   };
 

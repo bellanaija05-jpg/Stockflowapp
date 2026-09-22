@@ -288,6 +288,24 @@ CREATE POLICY "Insert sale items"
         )
     );
 
+-- INVENTORY MOVEMENTS Policies
+CREATE POLICY "Read inventory movements restricted by store"
+    ON inventory_movements FOR SELECT
+    TO authenticated
+    USING (
+        get_auth_role() = 'ADMIN' OR
+        store_id = get_auth_store()
+    );
+
+-- AUDIT LOGS Policies (Milestone 5C)
+-- The checkout RPC writes audit rows via SECURITY DEFINER (bypassing RLS), but
+-- reads require an explicit SELECT policy; without one, RLS returns an empty
+-- set to every authenticated user.
+CREATE POLICY "Super Admins can read audit logs"
+    ON audit_logs FOR SELECT
+    TO authenticated
+    USING (get_auth_role() = 'ADMIN');
+
 -- ==============================================================================
 -- 5A.8 ATOMIC POS CHECKOUT STORED PROCEDURE (RPC)
 -- ==============================================================================
@@ -427,6 +445,89 @@ BEGIN
         'total', v_total,
         'subtotal', v_subtotal,
         'discount', COALESCE(p_discount, 0)
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- ==============================================================================
+-- 5D ATOMIC INVENTORY ADJUSTMENT STORED PROCEDURE (RPC)
+-- ==============================================================================
+-- Guarantees atomicity: locks inventory row, updates stock, creates movement record,
+-- and creates an audit log entry in a single transaction.
+
+CREATE OR REPLACE FUNCTION adjust_inventory_stock(
+    p_product_id TEXT,
+    p_store_id TEXT,
+    p_new_quantity INTEGER,
+    p_user_id UUID,
+    p_user_name TEXT,
+    p_user_role TEXT,
+    p_movement_type movement_type,
+    p_notes TEXT
+)
+RETURNS JSONB AS $$
+DECLARE
+    v_curr_qty INTEGER;
+    v_diff INTEGER;
+    v_prod_name TEXT;
+    v_store_name TEXT;
+    v_movement_id TEXT;
+    v_audit_id TEXT;
+BEGIN
+    IF p_new_quantity < 0 THEN
+        RAISE EXCEPTION 'Stock quantity cannot be negative';
+    END IF;
+
+    -- Lock inventory row for this product in target store
+    SELECT quantity INTO v_curr_qty
+    FROM inventory
+    WHERE product_id = p_product_id AND store_id = p_store_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        -- If inventory record doesn't exist, we will create it (quantity 0 originally)
+        v_curr_qty := 0;
+        INSERT INTO inventory (product_id, store_id, quantity, updated_at)
+        VALUES (p_product_id, p_store_id, p_new_quantity, NOW());
+    ELSE
+        UPDATE inventory
+        SET quantity = p_new_quantity,
+            updated_at = NOW()
+        WHERE product_id = p_product_id AND store_id = p_store_id;
+    END IF;
+
+    v_diff := p_new_quantity - v_curr_qty;
+
+    -- Get product and store names for audit log
+    SELECT name INTO v_prod_name FROM products WHERE id = p_product_id;
+    SELECT name INTO v_store_name FROM stores WHERE id = p_store_id;
+
+    -- Record Inventory Movement Ledger
+    v_movement_id := 'mvm-' || uuid_generate_v4()::TEXT;
+    INSERT INTO inventory_movements (
+        id, product_id, store_id, quantity, movement_type,
+        user_id, notes, previous_quantity, new_quantity, created_at
+    ) VALUES (
+        v_movement_id, p_product_id, p_store_id, v_diff, p_movement_type,
+        p_user_id, p_notes, v_curr_qty, p_new_quantity, NOW()
+    );
+
+    -- Record Audit Log
+    v_audit_id := 'aud-' || uuid_generate_v4()::TEXT;
+    INSERT INTO audit_logs (
+        id, user_id, user_name, user_role, action, entity, entity_id, details, created_at
+    ) VALUES (
+        v_audit_id, p_user_id, p_user_name, p_user_role::user_role, 'INVENTORY_ADJUSTED', 'Inventory', v_movement_id,
+        jsonb_build_object(
+            'message', 'Stock for ' || COALESCE(v_prod_name, p_product_id) || ' at ' || COALESCE(v_store_name, p_store_id) || ' adjusted from ' || v_curr_qty || ' to ' || p_new_quantity || '. Note: ' || COALESCE(p_notes, '')
+        ),
+        NOW()
+    );
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'newQuantity', p_new_quantity,
+        'previousQuantity', v_curr_qty
     );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;

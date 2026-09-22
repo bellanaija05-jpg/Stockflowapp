@@ -1,7 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { formatNaira } from '../utils/currency';
 import { storage } from '../db/storageEngine';
+import { SupabaseBridge } from '../db/supabaseBridge';
+import { Product, Sale, StoreInventory } from '../types';
 import {
   Store,
   ShoppingCart,
@@ -10,6 +12,7 @@ import {
   ArrowRight,
   TrendingUp,
   Package,
+  Loader2,
 } from 'lucide-react';
 
 interface AttendantDashboardProps {
@@ -25,6 +28,64 @@ export const AttendantDashboard: React.FC<AttendantDashboardProps> = ({
 }) => {
   const { currentUser, currentStore } = useAuth();
   const [quickSku, setQuickSku] = useState('');
+  const [storeSales, setStoreSales] = useState<Sale[]>([]);
+  const [storeStock, setStoreStock] = useState<(StoreInventory & { product?: Product })[]>([]);
+  const [isLoadingData, setIsLoadingData] = useState<boolean>(true);
+  const [dataLoadError, setDataLoadError] = useState<string | null>(null);
+
+  // Milestone 5C: authoritative Supabase reads for this attendant's branch
+  const loadData = async () => {
+    if (!currentStore) return;
+
+    setIsLoadingData(true);
+    setDataLoadError(null);
+
+    if (SupabaseBridge.isConnected()) {
+      const [salesResult, inventoryResult, productsResult] = await Promise.all([
+        SupabaseBridge.fetchSales({ storeId: currentStore.id, limit: 200 }),
+        SupabaseBridge.fetchInventory(currentStore.id),
+        SupabaseBridge.fetchProducts(),
+      ]);
+
+      if (!salesResult.success) {
+        setDataLoadError(`Failed to load store sales: ${salesResult.error}`);
+        setIsLoadingData(false);
+        return;
+      }
+      if (!inventoryResult.success) {
+        setDataLoadError(`Failed to load store inventory: ${inventoryResult.error}`);
+        setIsLoadingData(false);
+        return;
+      }
+      if (!productsResult.success) {
+        setDataLoadError(`Failed to load products: ${productsResult.error}`);
+        setIsLoadingData(false);
+        return;
+      }
+
+      setStoreSales(salesResult.sales || []);
+
+      // Rebuild the { product, quantity } list that getStoreStockList() provided
+      const productMap = new Map((productsResult.products || []).map((p) => [p.id, p]));
+      setStoreStock(
+        (inventoryResult.inventory || []).map((inv) => ({
+          ...inv,
+          product: productMap.get(inv.productId),
+        }))
+      );
+    } else {
+      // Fallback for offline demo mode
+      setStoreSales(storage.getSalesByStore(currentStore.id));
+      setStoreStock(storage.getStoreStockList(currentStore.id));
+    }
+
+    setIsLoadingData(false);
+  };
+
+  useEffect(() => {
+    loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStore?.id]);
 
   if (!currentStore) {
     return (
@@ -34,14 +95,37 @@ export const AttendantDashboard: React.FC<AttendantDashboardProps> = ({
     );
   }
 
-  // Live queries scoped strictly to this store
-  const storeSales = storage.getSalesByStore(currentStore.id);
+  // Milestone 5C: loading / error gates (strict Supabase mode, no seed fallback)
+  if (isLoadingData) {
+    return (
+      <div className="p-12 bg-slate-900 border border-slate-800 rounded-2xl flex flex-col items-center justify-center gap-3">
+        <Loader2 className="w-8 h-8 text-emerald-400 animate-spin" />
+        <p className="text-sm text-slate-400">Loading your branch data from Supabase...</p>
+      </div>
+    );
+  }
+
+  if (dataLoadError) {
+    return (
+      <div className="p-8 max-w-2xl mx-auto my-12 bg-slate-900 border border-rose-800/50 rounded-2xl text-center space-y-4 shadow-2xl">
+        <AlertTriangle className="w-8 h-8 text-rose-400 mx-auto" />
+        <h2 className="text-xl font-black text-white">Could not load branch dashboard</h2>
+        <p className="text-xs text-slate-400">{dataLoadError}</p>
+        <div className="pt-2">
+          <button
+            onClick={loadData}
+            className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-lg shadow-emerald-900/40"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   const now = new Date().toISOString().split('T')[0];
   const todaySales = storeSales.filter((s) => s.createdAt.startsWith(now));
   const todayRevenue = todaySales.reduce((acc, s) => acc + s.total, 0);
-
-  // Store stock analysis
-  const storeStock = storage.getStoreStockList(currentStore.id);
   const lowStockItems = storeStock.filter((item) => {
     if (!item.product) return false;
     return item.quantity > 0 && item.quantity <= item.product.reorderLevel;
