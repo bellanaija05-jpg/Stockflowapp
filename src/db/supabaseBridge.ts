@@ -12,6 +12,8 @@ import {
   User,
   Category,
   InventoryMovement,
+  StockTransfer,
+  TransferStatus,
 } from '../types';
 
 /**
@@ -732,6 +734,112 @@ export class SupabaseBridge {
       return { success: true };
     } catch (err: any) {
       return { success: false, error: err.message || 'RPC Adjustment failed' };
+    }
+  }
+
+  /**
+   * Fetch inter-store stock transfers (Milestone 6).
+   * Connected: `stock_transfers` (Admin-only SELECT policy). Offline: the
+   * existing StorageEngine transfer store — untouched, and the only offline
+   * implementation (no second one is created here).
+   */
+  public static async fetchTransfers(limit: number = 500): Promise<{ success: boolean; transfers?: StockTransfer[]; error?: string }> {
+    if (!this.isConnected() || !supabase) {
+      // Offline demo mode — existing StorageEngine behaviour, preserved.
+      return { success: true, transfers: storage.getTransfers() };
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from('stock_transfers')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(limit);
+
+      if (error) {
+        return { success: false, error: error.message };
+      }
+
+      const transfers: StockTransfer[] = (data || []).map((t: any) => ({
+        id: t.id,
+        transferNumber: t.transfer_number,
+        productId: t.product_id,
+        sourceStoreId: t.source_store_id,
+        destinationStoreId: t.destination_store_id,
+        quantity: t.quantity,
+        status: t.status as TransferStatus,
+        // stock_transfers stores the UUID only (created_by → auth.users.id);
+        // the display name is resolved from public.profiles at render time.
+        initiatedByUserId: t.created_by || '',
+        initiatedByUserName: '',
+        notes: t.notes || undefined,
+        createdAt: t.created_at,
+      }));
+
+      return { success: true, transfers };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Failed to load stock transfers' };
+    }
+  }
+
+  /**
+   * Execute an immediate inter-store stock transfer (Milestone 6, V1).
+   *
+   * Connected: `public.execute_stock_transfer` RPC. The actor identity is
+   * derived INSIDE PostgreSQL from auth.uid(), so no identity is ever sent —
+   * the RPC accepts only p_product_id / p_source_store_id /
+   * p_destination_store_id / p_quantity / p_notes. userId/userName are used
+   * exclusively by the offline StorageEngine path below.
+   *
+   * Offline: the existing StorageEngine transfer implementation, untouched.
+   */
+  public static async executeTransfer(params: {
+    productId: string;
+    sourceStoreId: string;
+    destinationStoreId: string;
+    quantity: number;
+    userId: string;
+    userName: string;
+    notes?: string;
+  }): Promise<{ success: boolean; transfer?: StockTransfer; error?: string }> {
+    if (!this.isConnected() || !supabase) {
+      // Offline demo mode only — existing localStorage transfer behaviour,
+      // preserved byte-for-byte (StorageEngine.executeTransfer).
+      return storage.executeTransfer(params);
+    }
+
+    try {
+      // Milestone 6: no actor parameters — the server uses auth.uid().
+      const { data, error } = await supabase.rpc('execute_stock_transfer', {
+        p_product_id: params.productId,
+        p_source_store_id: params.sourceStoreId,
+        p_destination_store_id: params.destinationStoreId,
+        p_quantity: params.quantity,
+        p_notes: params.notes ?? null,
+      });
+
+      if (error) {
+        return { success: false, error: error.message };
+      }
+
+      return {
+        success: true,
+        transfer: {
+          id: data.transferId,
+          transferNumber: data.transferNumber,
+          productId: params.productId,
+          sourceStoreId: params.sourceStoreId,
+          destinationStoreId: params.destinationStoreId,
+          quantity: params.quantity,
+          status: 'COMPLETED',
+          initiatedByUserId: data.createdBy,
+          initiatedByUserName: data.createdByName,
+          notes: params.notes,
+          createdAt: data.createdAt,
+        },
+      };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Stock transfer failed' };
     }
   }
 }

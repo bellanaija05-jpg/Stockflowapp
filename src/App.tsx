@@ -11,6 +11,7 @@ import { ProductsPage } from './pages/ProductsPage';
 import { InventoryPage } from './pages/InventoryPage';
 import { POSPage } from './pages/POSPage';
 import { SalesPage } from './pages/SalesPage';
+import { TransfersPage } from './pages/TransfersPage';
 import { PlaceholderModulePage } from './pages/PlaceholderModulePage';
 import { AccessDenied } from './components/common/AccessDenied';
 import { LoginPage } from './components/auth/LoginPage';
@@ -165,23 +166,7 @@ const MainContent: React.FC = () => {
 
       case 'transfers':
         return isAdmin ? (
-          <PlaceholderModulePage
-            title="Inter-Store Stock Transfers"
-            subtitle="Move inventory securely between physical stores"
-            milestone="Milestone 6"
-            description="Move stock safely between retail branches with audit tracking, transfer requests, in-transit status handling, and confirmation upon arrival."
-            icon={ArrowLeftRight}
-            features={[
-              'Source and Destination store selection',
-              'Stock quantity availability checks',
-              'Atomic transfer execution',
-              'PENDING, IN_TRANSIT, and COMPLETED statuses',
-              'Full audit trail and movement history',
-              'Store managers transfer requests',
-            ]}
-            actionText="Go to Dashboard"
-            onActionClick={() => setCurrentPage('dashboard')}
-          />
+          <TransfersPage onNavigateHome={() => setCurrentPage('dashboard')} />
         ) : (
           <AccessDenied requiredRole="Super Admin" onGoBack={() => setCurrentPage('dashboard')} />
         );

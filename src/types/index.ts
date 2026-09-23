@@ -126,7 +126,7 @@ export interface InventoryMovement {
   createdAt: string;
 }
 
-export type TransferStatus = 'COMPLETED' | 'PENDING' | 'CANCELLED';
+export type TransferStatus = 'PENDING' | 'IN_TRANSIT' | 'COMPLETED' | 'CANCELLED';
 
 export interface StockTransfer {
   id: string;

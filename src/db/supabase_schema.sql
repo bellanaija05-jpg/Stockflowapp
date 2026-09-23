@@ -632,3 +632,318 @@ CREATE OR REPLACE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW
   EXECUTE FUNCTION public.handle_new_user();
+
+-- =============================================================================
+-- MILESTONE 6 — INTER-STORE STOCK TRANSFERS (NEW OBJECTS ONLY)
+-- =============================================================================
+-- These are NEW Milestone 6 objects for the Admin-only, immediate-execution
+-- (V1) inter-store transfer flow: a successful transfer is always recorded
+-- with status COMPLETED. There is no PENDING / IN_TRANSIT / receiving /
+-- approval workflow in V1.
+--
+-- IMPORTANT — NOT YET APPLIED TO THE LIVE PROJECT: unlike the Milestone 5G
+-- parity block above (already applied in the verified live project), this
+-- block has NOT been executed anywhere. The operator must run this block in
+-- the Supabase SQL Editor before connected Stock Transfers work. Nothing in
+-- this repository executes it.
+--
+-- This block adds ONLY new objects:
+--   1. a new index on stock_transfers(created_at)
+--   2. two new RLS policies on stock_transfers (SELECT + INSERT, Admin only)
+--   3. a new SECURITY DEFINER function public.execute_stock_transfer(...)
+-- Existing tables, enums, indexes, policies, triggers, helper functions and
+-- the existing RPCs (process_pos_checkout, adjust_inventory_stock) are NOT
+-- modified, and the 5G parity block above is untouched. CREATE POLICY has no
+-- IF NOT EXISTS, so — like every other policy section in this file — this
+-- block is a run-once script.
+--
+-- SECURITY NOTES (Milestone 6):
+--   * execute_stock_transfer accepts NO client-supplied identity: there is no
+--     p_user_id / p_user_name / p_user_role parameter. The actor is always
+--     auth.uid(), the actor name is read server-side from public.profiles
+--     (audit_logs.user_name is NOT NULL), and the ADMIN requirement is
+--     verified INSIDE the function via public.get_auth_role() BEFORE any
+--     mutation — a SECURITY DEFINER function must not rely on RLS for its
+--     authorization.
+--   * This NEW function pins its search path (SET search_path = '') and
+--     schema-qualifies every object it touches. The older RPCs keep their own
+--     definitions untouched. All identifiers and transfer numbers come from
+--     pg_catalog's gen_random_uuid(), so the function does not depend on which
+--     schema the uuid-ossp extension was installed into (no sequence, table or
+--     tracking object is introduced).
+--   * V1 writes the stock_transfers row, exactly two inventory_movements rows
+--     and exactly one STOCK_TRANSFERRED audit_logs row inside this ONE
+--     function. React must never insert them and must never write a second
+--     transfer audit row; a failure anywhere rolls the whole transaction back.
+--
+-- LOCKING: source/destination store rows are locked FOR UPDATE first in
+-- deterministic LEAST(store_id), GREATEST(store_id) order. This closes the
+-- missing-destination-row concurrency gap: a destination inventory row that
+-- does not exist cannot be locked, so the parent store rows serialize
+-- opposite-direction transfers before any inventory row is touched.
+-- Inventory rows are then locked in the same store order. Sufficiency is
+-- checked against the LOCKED source quantity. A missing source row counts
+-- as 0 and fails (it is never created); a missing destination row is still
+-- created, with unique_product_store arbitrating concurrent creators
+-- through ON CONFLICT. The transfer remains atomic: any failure rolls back
+-- the whole transaction.
+--
+-- TRANSFER NUMBER: TRF-YYYYMMDD-<12 HEX CHARACTERS>, generated in PostgreSQL
+-- from gen_random_uuid(). stock_transfers.transfer_number UNIQUE remains the
+-- collision backstop (a collision aborts the whole transaction).
+
+-- 1. Listing index (NEW object only).
+CREATE INDEX IF NOT EXISTS idx_transfers_created_at ON stock_transfers(created_at);
+
+-- 2. stock_transfers RLS (the table already has RLS enabled above; V1 has no
+--    edit/delete workflow, so deliberately NO UPDATE and NO DELETE policy).
+CREATE POLICY "Super Admins can read stock transfers"
+    ON stock_transfers FOR SELECT
+    TO authenticated
+    USING (public.get_auth_role() = 'ADMIN');
+
+CREATE POLICY "Super Admins can insert own stock transfers"
+    ON stock_transfers FOR INSERT
+    TO authenticated
+    WITH CHECK (public.get_auth_role() = 'ADMIN' AND created_by = auth.uid());
+
+-- 3. Atomic immediate-execution transfer RPC (V1 success => status COMPLETED).
+--    SECURITY DEFINER with a pinned search path; no client actor parameters.
+CREATE OR REPLACE FUNCTION public.execute_stock_transfer(
+    p_product_id TEXT,
+    p_source_store_id TEXT,
+    p_destination_store_id TEXT,
+    p_quantity INTEGER,
+    p_notes TEXT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $function$
+DECLARE
+    v_actor_id        UUID := auth.uid();
+    v_actor_role      TEXT;
+    v_actor_name      TEXT;
+    v_prod_name       TEXT;
+    v_source_name     TEXT;
+    v_dest_name       TEXT;
+    v_store_a         TEXT;
+    v_store_b         TEXT;
+    v_a_found         BOOLEAN := FALSE;
+    v_b_found         BOOLEAN := FALSE;
+    v_a_qty           INTEGER := 0;
+    v_b_qty           INTEGER := 0;
+    v_src_prev        INTEGER := 0;
+    v_dest_prev       INTEGER := 0;
+    v_src_new         INTEGER;
+    v_dest_new        INTEGER;
+    v_uuid            UUID;
+    v_transfer_id     TEXT;
+    v_transfer_number TEXT;
+    v_created_at      TIMESTAMPTZ := NOW();
+BEGIN
+    -- 1. Authenticate the caller (never client-supplied).
+    IF v_actor_id IS NULL THEN
+        RAISE EXCEPTION 'Authentication required.';
+    END IF;
+
+    -- 2. Verify ADMIN inside the function (not via RLS) before any mutation.
+    v_actor_role := public.get_auth_role();
+    IF v_actor_role IS DISTINCT FROM 'ADMIN' THEN
+        RAISE EXCEPTION 'Only Super Admins can execute stock transfers.';
+    END IF;
+
+    -- Actor name read server-side from public.profiles for the audit row.
+    SELECT COALESCE(NULLIF(pf.name, ''), pf.email)
+      INTO v_actor_name
+      FROM public.profiles pf
+     WHERE pf.id = v_actor_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Authenticated profile not found in public.profiles.';
+    END IF;
+
+    -- 3-7. Parameter and reference validation (no locks held yet).
+    IF p_source_store_id = p_destination_store_id THEN
+        RAISE EXCEPTION 'Source and destination store cannot be the same.';
+    END IF;
+    IF p_quantity IS NULL OR p_quantity <= 0 THEN
+        RAISE EXCEPTION 'Transfer quantity must be a positive integer.';
+    END IF;
+    SELECT pr.name INTO v_prod_name FROM public.products pr WHERE pr.id = p_product_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Product not found.';
+    END IF;
+    SELECT ss.name INTO v_source_name FROM public.stores ss WHERE ss.id = p_source_store_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Source store not found.';
+    END IF;
+    SELECT ds.name INTO v_dest_name FROM public.stores ds WHERE ds.id = p_destination_store_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Destination store not found.';
+    END IF;
+
+    -- 8. Deterministic lock order: LEAST store id first, then GREATEST.
+    --    The EXISTING source/destination store rows are locked first so that
+    --    opposite-direction transfers serialize even when a destination
+    --    inventory row does not exist yet (an absent inventory row cannot be
+    --    locked by FOR UPDATE). Inventory rows are then locked in the same
+    --    store order. A missing inventory row just yields NOT FOUND here.
+    v_store_a := LEAST(p_source_store_id, p_destination_store_id);
+    v_store_b := GREATEST(p_source_store_id, p_destination_store_id);
+
+    PERFORM id
+      FROM public.stores
+     WHERE id = v_store_a
+       FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Store not found.';
+    END IF;
+
+    PERFORM id
+      FROM public.stores
+     WHERE id = v_store_b
+       FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Store not found.';
+    END IF;
+
+    SELECT inv.quantity INTO v_a_qty
+      FROM public.inventory inv
+     WHERE inv.product_id = p_product_id AND inv.store_id = v_store_a
+       FOR UPDATE;
+    v_a_found := FOUND;
+
+    SELECT inv.quantity INTO v_b_qty
+      FROM public.inventory inv
+     WHERE inv.product_id = p_product_id AND inv.store_id = v_store_b
+       FOR UPDATE;
+    v_b_found := FOUND;
+
+    IF p_source_store_id = v_store_a THEN
+        IF v_a_found THEN v_src_prev := v_a_qty; END IF;
+        IF v_b_found THEN v_dest_prev := v_b_qty; END IF;
+    ELSE
+        IF v_b_found THEN v_src_prev := v_b_qty; END IF;
+        IF v_a_found THEN v_dest_prev := v_a_qty; END IF;
+    END IF;
+
+    -- 9. Sufficiency is checked against the LOCKED source quantity (a missing
+    --    source row counts as 0). The source row is never created here.
+    IF v_src_prev < p_quantity THEN
+        RAISE EXCEPTION 'Insufficient stock at source store. Available: %, Requested: %',
+            v_src_prev, p_quantity;
+    END IF;
+
+    -- 10. Decrement the locked source row.
+    UPDATE public.inventory inv
+       SET quantity = v_src_prev - p_quantity,
+           updated_at = v_created_at
+     WHERE inv.product_id = p_product_id
+       AND inv.store_id = p_source_store_id
+    RETURNING inv.quantity INTO v_src_new;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Insufficient stock at source store. Available: 0, Requested: %',
+            p_quantity;
+    END IF;
+
+    -- 11. Increment (or create) the destination row. ON CONFLICT targets the
+    --     existing unique_product_store constraint so concurrent creators are
+    --     arbitrated safely; RETURNING yields the exact post-write quantity so
+    --     the movement's previous/new values are never guessed.
+    INSERT INTO public.inventory AS inv (id, product_id, store_id, quantity, updated_at)
+    VALUES (gen_random_uuid()::TEXT, p_product_id, p_destination_store_id, p_quantity, v_created_at)
+    ON CONFLICT (product_id, store_id)
+    DO UPDATE SET quantity = inv.quantity + p_quantity,
+                  updated_at = v_created_at
+    RETURNING inv.quantity INTO v_dest_new;
+
+    v_dest_prev := v_dest_new - p_quantity;
+
+    -- 12. Transfer row (V1: immediate execution => always COMPLETED).
+    --     transfer_number is generated here in PostgreSQL:
+    --     TRF-YYYYMMDD-<12 HEX CHARACTERS> (never in React).
+    v_uuid := gen_random_uuid();
+    v_transfer_id := 'trf-' || v_uuid::TEXT;
+    v_transfer_number := 'TRF-' || TO_CHAR(v_created_at, 'YYYYMMDD') || '-'
+                         || UPPER(SUBSTRING(REPLACE(v_uuid::TEXT, '-', '') FROM 1 FOR 12));
+
+    INSERT INTO public.stock_transfers (
+        id, transfer_number, product_id, source_store_id, destination_store_id,
+        quantity, status, created_by, notes, created_at, updated_at
+    ) VALUES (
+        v_transfer_id, v_transfer_number, p_product_id, p_source_store_id, p_destination_store_id,
+        p_quantity, 'COMPLETED', v_actor_id, p_notes, v_created_at, v_created_at
+    );
+
+    -- 13-14. Exactly two movement ledger rows sharing reference_id = transfer id.
+    INSERT INTO public.inventory_movements (
+        id, product_id, store_id, quantity, movement_type, reference_id,
+        user_id, notes, previous_quantity, new_quantity, created_at
+    ) VALUES (
+        'mvm-' || gen_random_uuid()::TEXT, p_product_id, p_source_store_id,
+        -p_quantity, 'TRANSFER_OUT', v_transfer_id, v_actor_id,
+        'Transfer to ' || v_dest_name || COALESCE(': ' || p_notes, ''),
+        v_src_prev, v_src_new, v_created_at
+    );
+
+    INSERT INTO public.inventory_movements (
+        id, product_id, store_id, quantity, movement_type, reference_id,
+        user_id, notes, previous_quantity, new_quantity, created_at
+    ) VALUES (
+        'mvm-' || gen_random_uuid()::TEXT, p_product_id, p_destination_store_id,
+        p_quantity, 'TRANSFER_IN', v_transfer_id, v_actor_id,
+        'Transfer from ' || v_source_name || COALESCE(': ' || p_notes, ''),
+        v_dest_prev, v_dest_new, v_created_at
+    );
+
+    -- 15. Exactly one audit row, written atomically with everything above.
+    INSERT INTO public.audit_logs (
+        id, user_id, user_name, user_role, action, entity, entity_id, details, created_at
+    ) VALUES (
+        'aud-' || gen_random_uuid()::TEXT, v_actor_id, v_actor_name,
+        CAST(v_actor_role AS public.user_role), 'STOCK_TRANSFERRED', 'StockTransfer',
+        v_transfer_id,
+        jsonb_build_object(
+            'message',
+            'Transferred ' || p_quantity || 'x ' || v_prod_name ||
+            ' from ' || v_source_name || ' to ' || v_dest_name ||
+            ' (' || v_src_prev || ' -> ' || v_src_new || ' / ' ||
+                    v_dest_prev || ' -> ' || v_dest_new || ').' ||
+            COALESCE(' Note: ' || p_notes, '')
+        ),
+        v_created_at
+    );
+
+    -- 16. JSON summary for the caller (any failure above rolls it all back).
+    RETURN jsonb_build_object(
+        'success', true,
+        'transferId', v_transfer_id,
+        'transferNumber', v_transfer_number,
+        'status', 'COMPLETED',
+        'createdBy', v_actor_id,
+        'createdByName', v_actor_name,
+        'createdAt', v_created_at,
+        'sourcePrevious', v_src_prev,
+        'sourceNew', v_src_new,
+        'destinationPrevious', v_dest_prev,
+        'destinationNew', v_dest_new
+    );
+END;
+$function$;
+
+-- Milestone 6 privilege hardening: PostgreSQL functions are executable by
+-- PUBLIC by default, so restrict this RPC to authenticated clients and revoke
+-- anonymous execution. The function itself still performs the ADMIN
+-- authorization check internally.
+REVOKE EXECUTE
+ON FUNCTION public.execute_stock_transfer(text, text, text, integer, text)
+FROM PUBLIC;
+
+REVOKE EXECUTE
+ON FUNCTION public.execute_stock_transfer(text, text, text, integer, text)
+FROM anon;
+
+GRANT EXECUTE
+ON FUNCTION public.execute_stock_transfer(text, text, text, integer, text)
+TO authenticated;
