@@ -25,11 +25,8 @@ import {
 } from 'lucide-react';
 
 export const POSPage: React.FC = () => {
-  const { currentUser } = useAuth();
+  const { currentUser, stores } = useAuth();
   const storage = StorageEngine.getInstance();
-
-  // Stores
-  const stores = useMemo(() => storage.getStores(), []);
   
   // Attendant store branch locking vs Admin branch switching
   const initialStoreId = useMemo(() => {
@@ -54,7 +51,7 @@ export const POSPage: React.FC = () => {
   );
 
   // Data
-  const categories = useMemo(() => storage.getCategories(), []);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [inventoryList, setInventoryList] = useState<any[]>([]);
   const [recentSales, setRecentSales] = useState<Sale[]>([]);
@@ -89,10 +86,11 @@ export const POSPage: React.FC = () => {
     setProductLoadError(null);
 
     if (SupabaseBridge.isConnected()) {
-      const [productsResult, inventoryResult, salesResult] = await Promise.all([
+      const [productsResult, inventoryResult, salesResult, categoriesResult] = await Promise.all([
         SupabaseBridge.fetchProducts(),
         SupabaseBridge.fetchInventory(selectedStoreId),
         SupabaseBridge.fetchSales({ storeId: selectedStoreId, limit: 8 }),
+        SupabaseBridge.fetchCategories(),
       ]);
 
       if (!productsResult.success) {
@@ -112,6 +110,10 @@ export const POSPage: React.FC = () => {
         setRecentSales(salesResult.sales || []);
       }
 
+      if (categoriesResult.success) {
+        setCategories(categoriesResult.categories as Category[] || []);
+      }
+
       setProducts(productsResult.products || []);
       setInventoryList(inventoryResult.inventory || []);
     } else {
@@ -119,10 +121,12 @@ export const POSPage: React.FC = () => {
       const allProducts = storage.getProducts().filter((p) => p.status === 'ACTIVE');
       const storeStock = storage.getInventory().filter((inv) => inv.storeId === selectedStoreId);
       const storeSales = storage.getSalesByStore(selectedStoreId);
+      const allCategories = storage.getCategories();
 
       setProducts(allProducts);
       setInventoryList(storeStock);
       setRecentSales(storeSales.slice(0, 8)); // Top 8 recent sales
+      setCategories(allCategories);
     }
 
     setIsLoadingProducts(false);
