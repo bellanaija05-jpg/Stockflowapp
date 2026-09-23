@@ -398,11 +398,14 @@ export class SupabaseBridge {
   /**
    * Milestone 5D-B: append a management audit entry.
    *
-   * Connected + authenticated  -> writes to Supabase `audit_logs` and NEVER falls
-   * back to localStorage on failure; the error is returned so the caller can
-   * surface it to the operator.
-   * Offline demo mode (Supabase not configured, or configured but signed out)
-   * -> writes through the StorageEngine, preserving the pre-5D-B behaviour.
+   * Connected + authenticated session -> writes to Supabase `audit_logs` and
+   * NEVER falls back to localStorage on failure; the error is returned so the
+   * caller can surface it to the operator.
+   * Connected without an authenticated session (Milestone 5F) -> returns a
+   * failure and persists nothing: the audit trail stays authoritative and no
+   * browser-local entry is created.
+   * Not connected (Supabase unconfigured) -> writes through the StorageEngine,
+   * preserving the pre-5D-B behaviour.
    *
    * The row `id` is deliberately omitted so the database default
    * (uuid_generate_v4()) generates it — a client-side `aud-${Date.now()}` can
@@ -443,9 +446,14 @@ export class SupabaseBridge {
       const authUserId = sessionData?.session?.user?.id;
 
       if (!authUserId) {
-        // Supabase is configured but nobody is signed in (local/demo session):
-        // keep the app usable. A failed insert WITH a session never falls back.
-        return writeLocal();
+        // Milestone 5F: connected mode is authoritative for the audit trail.
+        // Without a session the row cannot be attributed, so fail loudly
+        // (surfaced by <AuditWriteWarning/>) instead of writing localStorage.
+        return {
+          success: false,
+          persistedTo: 'supabase',
+          error: 'No authenticated session available to record the audit entry.',
+        };
       }
 
       const { error } = await supabase.from('audit_logs').insert({

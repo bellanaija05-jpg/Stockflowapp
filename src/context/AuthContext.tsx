@@ -370,6 +370,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
    * Switch user (Demo/Inspection feature)
    */
   const switchUser = (userId: string) => {
+    // Milestone 5F: demo-only. While Supabase Auth is connected the
+    // authenticated identity is authoritative, so no browser-local identity is
+    // written or read and the session is left untouched.
+    if (isSupabaseActive) {
+      console.warn('[auth] switchUser is disabled while Supabase Auth is connected.');
+      return;
+    }
+
     storage.setCurrentUser(userId);
     const selected = storage.getUserById(userId);
     if (selected) {

@@ -106,7 +106,13 @@ export const StoresPage: React.FC<StoresPageProps> = ({ onNavigateHome }) => {
         status: formData.status,
         updatedAt: now,
       };
-      await SupabaseBridge.saveStore(updated);
+      // Milestone 5F: never claim success (or write an audit row) when the
+      // database rejected the branch.
+      const saveRes = await SupabaseBridge.saveStore(updated);
+      if (!saveRes.success) {
+        setErrorMessage(saveRes.error || 'The store could not be saved. No changes were made.');
+        return;
+      }
 
       // Audit Log (Milestone 5D-B: Supabase when connected, localStorage when offline)
       const audit = await SupabaseBridge.writeAuditLog({
@@ -134,7 +140,13 @@ export const StoresPage: React.FC<StoresPageProps> = ({ onNavigateHome }) => {
         createdAt: now,
         updatedAt: now,
       };
-      await SupabaseBridge.saveStore(newStore);
+      // Milestone 5F: a rejected insert must not be reported as a created branch
+      // (stores.name is not unique, but RLS/validation failures still occur).
+      const createRes = await SupabaseBridge.saveStore(newStore);
+      if (!createRes.success) {
+        setErrorMessage(createRes.error || 'The store could not be created. No changes were made.');
+        return;
+      }
 
       // Audit Log (Milestone 5D-B: Supabase when connected, localStorage when offline)
       const audit = await SupabaseBridge.writeAuditLog({

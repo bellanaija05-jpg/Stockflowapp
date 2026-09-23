@@ -31,6 +31,10 @@ export const Header: React.FC<HeaderProps> = ({
   const [isResetting, setIsResetting] = useState(false);
 
   const handleResetData = () => {
+    // Milestone 5F: demo-only surface. Connected mode reads Supabase, so the
+    // browser-local demo cache must never be reset from a connected session.
+    if (isSupabaseActive) return;
+
     if (window.confirm('Reset all demo data back to default initial seed? (All new sales will be cleared, and stock restored)')) {
       setIsResetting(true);
       storage.resetToDefaults();
@@ -102,32 +106,51 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           )}
 
-          {/* Reset Demo Data Button */}
-          <button
-            onClick={handleResetData}
-            title="Reset demo data to default stock levels"
-            disabled={isResetting}
-            className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg border border-slate-800 transition-colors hidden sm:flex items-center gap-1 text-xs cursor-pointer"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${isResetting ? 'animate-spin text-emerald-400' : ''}`} />
-            <span className="hidden lg:inline text-[11px]">Reset Demo</span>
-          </button>
+          {/* Reset Demo Data Button — offline/demo mode only (Milestone 5F) */}
+          {!isSupabaseActive && (
+            <button
+              onClick={handleResetData}
+              title="Reset demo data to default stock levels"
+              disabled={isResetting}
+              className="p-2 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg border border-slate-800 transition-colors hidden sm:flex items-center gap-1 text-xs cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isResetting ? 'animate-spin text-emerald-400' : ''}`} />
+              <span className="hidden lg:inline text-[11px]">Reset Demo</span>
+            </button>
+          )}
 
-          {/* Demo User Switcher Trigger (Development Inspector) */}
+          {/* Demo User Switcher Trigger (Development Inspector).
+              Milestone 5F: while Supabase is connected the authenticated
+              identity is authoritative, so this control is locked and says so. */}
           <button
-            onClick={() => setIsSwitcherOpen(true)}
-            title="Inspect permissions as Admin or Attendant"
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all text-xs font-medium cursor-pointer ${
+            onClick={() => {
+              if (isSupabaseActive) return;
+              setIsSwitcherOpen(true);
+            }}
+            aria-disabled={isSupabaseActive}
+            title={
+              isSupabaseActive
+                ? 'Role switching is unavailable while connected to Supabase — your role and store come from your profile'
+                : 'Inspect permissions as Admin or Attendant'
+            }
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all text-xs font-medium ${
               isAdmin
                 ? 'bg-indigo-600/15 border-indigo-500/40 text-indigo-200 hover:bg-indigo-600/25'
                 : 'bg-emerald-600/15 border-emerald-500/40 text-emerald-200 hover:bg-emerald-600/25'
-            }`}
+            } ${isSupabaseActive ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'}`}
           >
-            <UserCheck className="w-3.5 h-3.5" />
+            {isSupabaseActive ? (
+              <ShieldCheck className="w-3.5 h-3.5" />
+            ) : (
+              <UserCheck className="w-3.5 h-3.5" />
+            )}
             <span className="hidden sm:inline">Role:</span>
             <span className="font-bold text-white max-w-[100px] truncate">
               {currentUser?.name || 'User'}
             </span>
+            {isSupabaseActive && (
+              <span className="hidden md:inline text-[10px] font-normal text-slate-400">(locked)</span>
+            )}
           </button>
 
           {/* Sign Out Action */}

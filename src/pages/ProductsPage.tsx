@@ -1323,7 +1323,13 @@ const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
       createdAt: new Date().toISOString(),
     };
 
-    await SupabaseBridge.saveCategory(newCat);
+    // Milestone 5F: never claim success (or write an audit row) when the
+    // database rejected the category (categories.name is UNIQUE in Postgres).
+    const saveRes = await SupabaseBridge.saveCategory(newCat);
+    if (!saveRes.success) {
+      setError(saveRes.error || 'The category could not be saved. No changes were made.');
+      return;
+    }
 
     // Milestone 5D-B: Supabase when connected, localStorage when offline.
     const audit = await SupabaseBridge.writeAuditLog({

@@ -23,7 +23,7 @@ interface UsersPageProps {
 }
 
 export const UsersPage: React.FC<UsersPageProps> = ({ onNavigateHome }) => {
-  const { isAdmin, users, stores, refreshUserData, currentUser } = useAuth();
+  const { isAdmin, users, stores, refreshUserData, currentUser, isSupabaseActive } = useAuth();
   const [searchTerm, setSearchTerm] = useState('');
   const [roleFilter, setRoleFilter] = useState<'ALL' | Role>('ALL');
   const [storeFilter, setStoreFilter] = useState<string>('ALL');
@@ -112,7 +112,13 @@ export const UsersPage: React.FC<UsersPageProps> = ({ onNavigateHome }) => {
         status: formData.status,
         updatedAt: now,
       };
-      await SupabaseBridge.saveProfile(updated);
+      // Milestone 5F: never claim success (or write an audit row) when the
+      // profile update was rejected — the Users page previously swallowed it.
+      const saveRes = await SupabaseBridge.saveProfile(updated);
+      if (!saveRes.success) {
+        setErrorMessage(saveRes.error || 'The user could not be saved. No changes were made.');
+        return;
+      }
 
       // Audit Log (Milestone 5D-B: Supabase when connected, localStorage when offline)
       const audit = await SupabaseBridge.writeAuditLog({
@@ -129,6 +135,19 @@ export const UsersPage: React.FC<UsersPageProps> = ({ onNavigateHome }) => {
         setAuditWarning(audit.error || 'Unknown error.');
       }
     } else {
+      // Milestone 5F: public.profiles.id is a UUID that references auth.users, so
+      // a profile row cannot be invented client-side. Refuse honestly instead of
+      // writing a phantom USER_CREATED audit entry for a user that never existed.
+      if (isSupabaseActive) {
+        setErrorMessage(
+          'Staff accounts must exist in Supabase Auth before a profile can be created. ' +
+            'Invite the user in the Supabase Dashboard (Authentication → Users); signing up creates the ' +
+            'profile row, and this screen then manages the role and store assignment. ' +
+            'Creating users is only available in offline demo mode.'
+        );
+        return;
+      }
+
       const newUser: User = {
         id: `user-${Date.now().toString().slice(-4)}`,
         name: formData.name.trim(),
@@ -139,7 +158,11 @@ export const UsersPage: React.FC<UsersPageProps> = ({ onNavigateHome }) => {
         createdAt: now,
         updatedAt: now,
       };
-      await SupabaseBridge.saveProfile(newUser);
+      const saveRes = await SupabaseBridge.saveProfile(newUser);
+      if (!saveRes.success) {
+        setErrorMessage(saveRes.error || 'The user could not be created. No changes were made.');
+        return;
+      }
 
       // Audit Log (Milestone 5D-B: Supabase when connected, localStorage when offline)
       const audit = await SupabaseBridge.writeAuditLog({
@@ -374,6 +397,18 @@ export const UsersPage: React.FC<UsersPageProps> = ({ onNavigateHome }) => {
                 </div>
               )}
 
+              {/* Milestone 5F: creating a profile is impossible while connected
+                  (profiles.id is a UUID referencing auth.users). State it plainly
+                  instead of failing silently on submit. */}
+              {!editingUser && isSupabaseActive && (
+                <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg text-amber-200 text-xs leading-relaxed">
+                  <strong className="text-amber-300">Profile creation is disabled while connected.</strong>{' '}
+                  Invite the staff member in Supabase Auth first (Authentication → Users). Sign-up creates their
+                  profile row; this screen then manages the role and store assignment. Creating users is only
+                  available in offline demo mode.
+                </div>
+              )}
+
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1.5">
                   Full Name *
@@ -466,7 +501,13 @@ export const UsersPage: React.FC<UsersPageProps> = ({ onNavigateHome }) => {
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold transition-colors"
+                  disabled={!editingUser && isSupabaseActive}
+                  title={
+                    !editingUser && isSupabaseActive
+                      ? 'Staff accounts are provisioned through Supabase Auth while connected.'
+                      : undefined
+                  }
+                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-xs font-semibold transition-colors"
                 >
                   {editingUser ? 'Save Changes' : 'Create User'}
                 </button>
