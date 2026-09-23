@@ -25,7 +25,7 @@ import {
 } from 'lucide-react';
 
 const MainContent: React.FC = () => {
-  const { currentUser, currentStore, isAdmin, isLoading } = useAuth();
+  const { currentUser, currentStore, isAdmin, isLoading, authReadError, refreshUserData } = useAuth();
   const [currentPage, setCurrentPage] = useState<PageView>('dashboard');
   const [selectedStoreFilter, setSelectedStoreFilter] = useState<string>('ALL');
 
@@ -223,6 +223,21 @@ const MainContent: React.FC = () => {
       selectedStoreFilter={selectedStoreFilter}
       onSelectStoreFilter={setSelectedStoreFilter}
     >
+      {/* Milestone 5H: non-destructive global warning for connected-mode read
+          failures. authError only renders on LoginPage, so a retained session
+          needs this surface; the banner disappears once a read succeeds. */}
+      {currentUser && authReadError && (
+        <div className="mb-4 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex items-start justify-between gap-3">
+          <span className="leading-relaxed">{authReadError}</span>
+          <button
+            type="button"
+            onClick={() => refreshUserData()}
+            className="shrink-0 px-3 py-1.5 rounded-md bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-100 text-xs font-semibold transition-colors cursor-pointer"
+          >
+            Retry
+          </button>
+        </div>
+      )}
       {renderCurrentView()}
     </AppLayout>
   );
