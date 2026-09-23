@@ -42,7 +42,11 @@ CREATE TABLE IF NOT EXISTS stores (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 4. User Profiles Table (Linked to auth.users if Supabase Auth is active)
+-- 4. User Profiles Table
+-- profiles.id is a UUID that references auth.users(id). New Supabase Auth users
+-- are bootstrapped into public.profiles by the on_auth_user_created trigger, which
+-- calls public.handle_new_user(); the live trigger and function definitions are
+-- recorded in the Milestone 5G parity block below.
 CREATE TABLE IF NOT EXISTS profiles (
     id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
     email TEXT NOT NULL UNIQUE,
@@ -581,3 +585,50 @@ ALTER TABLE public.products ADD  CONSTRAINT products_status_check
 -- ) AS v(sku, brand, model)
 -- WHERE p.sku = v.sku
 --   AND (p.brand IS DISTINCT FROM v.brand OR p.model IS DISTINCT FROM v.model);
+
+-- ==============================================================================
+-- MILESTONE 5G PARITY RECORD — AUTH → PROFILES BOOTSTRAP TRIGGER
+-- ==============================================================================
+-- Documentation/parity record only. These two objects are ALREADY APPLIED in the
+-- verified live Supabase project; this block records that live Auth architecture
+-- in the repository. Nothing above depends on it, and nothing here changes any
+-- existing table, policy, RPC, enum, constraint, index or helper function.
+--
+-- Live behaviour: every INSERT into auth.users (user created from the Supabase
+-- Dashboard, an invite, or sign-up) fires public.handle_new_user(), which inserts
+-- the matching public.profiles row with role ATTENDANT and status ACTIVE. The
+-- Users page therefore manages role, store assignment and status only; it cannot
+-- create profiles client-side, because profiles.id is a UUID owned by Auth.
+--
+-- WARNING: creating a trigger on auth.users requires ownership of the auth.users
+-- table (or equivalent privileges). In a managed Supabase project that normally
+-- means running it as the project owner / postgres role from the SQL editor. A
+-- role without those privileges fails with a permission error and leaves the
+-- database unchanged. Review before running; do not re-run against the live
+-- project without re-checking that these definitions still match.
+
+-- Live function definition (verbatim from the verified live project).
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+AS $function$
+BEGIN
+  INSERT INTO public.profiles (id, email, name, role, status)
+  VALUES (
+    new.id,
+    new.email,
+    COALESCE(new.raw_user_meta_data->>'name', 'New Staff'),
+    'ATTENDANT',
+    'ACTIVE'
+  );
+  RETURN new;
+END;
+$function$;
+
+-- Live trigger (verbatim from the verified live project). CREATE OR REPLACE keeps
+-- this idempotent and re-runnable; the trigger is never dropped and recreated.
+CREATE OR REPLACE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW
+  EXECUTE FUNCTION public.handle_new_user();

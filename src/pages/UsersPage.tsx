@@ -138,12 +138,14 @@ export const UsersPage: React.FC<UsersPageProps> = ({ onNavigateHome }) => {
       // Milestone 5F: public.profiles.id is a UUID that references auth.users, so
       // a profile row cannot be invented client-side. Refuse honestly instead of
       // writing a phantom USER_CREATED audit entry for a user that never existed.
+      // Milestone 5G: the refusal names the live Auth → trigger → profile path.
       if (isSupabaseActive) {
         setErrorMessage(
-          'Staff accounts must exist in Supabase Auth before a profile can be created. ' +
-            'Invite the user in the Supabase Dashboard (Authentication → Users); signing up creates the ' +
-            'profile row, and this screen then manages the role and store assignment. ' +
-            'Creating users is only available in offline demo mode.'
+          'Staff accounts are created in Supabase Authentication, not on this screen. ' +
+            'Add the staff member in the Supabase Dashboard (Authentication → Users); the Auth trigger ' +
+            '"on_auth_user_created" then creates their StockFlow profile automatically. ' +
+            'Use this page to assign their role, store and status. ' +
+            'Creating users here is available in offline demo mode only.'
         );
         return;
       }
@@ -399,13 +401,18 @@ export const UsersPage: React.FC<UsersPageProps> = ({ onNavigateHome }) => {
 
               {/* Milestone 5F: creating a profile is impossible while connected
                   (profiles.id is a UUID referencing auth.users). State it plainly
-                  instead of failing silently on submit. */}
+                  instead of failing silently on submit.
+                  Milestone 5G: name the live Auth → on_auth_user_created → profiles
+                  path, and say plainly which parts of the record live here. */}
               {!editingUser && isSupabaseActive && (
                 <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg text-amber-200 text-xs leading-relaxed">
-                  <strong className="text-amber-300">Profile creation is disabled while connected.</strong>{' '}
-                  Invite the staff member in Supabase Auth first (Authentication → Users). Sign-up creates their
-                  profile row; this screen then manages the role and store assignment. Creating users is only
-                  available in offline demo mode.
+                  <strong className="text-amber-300">
+                    Staff accounts are created in Supabase Authentication, not on this screen.
+                  </strong>{' '}
+                  Add the staff member in the Supabase Dashboard (Authentication → Users); the Auth trigger
+                  &quot;on_auth_user_created&quot; then creates their StockFlow profile automatically. Use this
+                  page to assign their role, store and status. Creating users here is available in offline demo
+                  mode only.
                 </div>
               )}
 
@@ -504,7 +511,7 @@ export const UsersPage: React.FC<UsersPageProps> = ({ onNavigateHome }) => {
                   disabled={!editingUser && isSupabaseActive}
                   title={
                     !editingUser && isSupabaseActive
-                      ? 'Staff accounts are provisioned through Supabase Auth while connected.'
+                      ? 'Staff accounts are created in Supabase Authentication, not on this screen. Add the staff member in the Supabase Dashboard (Authentication → Users); the on_auth_user_created trigger then creates their StockFlow profile. Assign role, store and status here. Creating users here is available in offline demo mode only.'
                       : undefined
                   }
                   className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-xs font-semibold transition-colors"
