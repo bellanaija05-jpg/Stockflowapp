@@ -296,6 +296,12 @@ export class StorageEngine {
     movementType: 'STOCK_IN' | 'ADJUSTMENT';
     notes: string;
   }): { success: boolean; error?: string } {
+    // Milestone 7 (offline parity): manual inventory adjustment is ADMIN-only
+    // in demo/offline mode as well. POS sales and transfers are unaffected.
+    if (params.userRole !== 'ADMIN') {
+      return { success: false, error: 'Manual stock adjustment is restricted to Super Admins.' };
+    }
+
     if (params.newQuantity < 0) {
       return { success: false, error: 'Stock quantity cannot be negative.' };
     }

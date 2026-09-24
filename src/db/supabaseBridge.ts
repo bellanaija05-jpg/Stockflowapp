@@ -712,17 +712,23 @@ export class SupabaseBridge {
       return storage.adjustStock(params);
     }
 
+    // Milestone 7: cheap client-side defense-in-depth only (the database is
+    // authoritative). Attendants never reach the adjustment RPC.
+    if (params.userRole !== 'ADMIN') {
+      return { success: false, error: 'Manual stock adjustment is restricted to Super Admins.' };
+    }
+
     // Milestone 5D-A: application movement vocabulary → DB movement_type enum.
     const dbMovementType = params.movementType === 'STOCK_IN' ? 'PURCHASE' : 'RECONCILIATION';
 
     try {
-      const { error } = await supabase.rpc('adjust_inventory_stock', {
+      // Milestone 7: connected adjustments go through the ADMIN-only
+      // execute_inventory_adjustment wrapper. It derives the actor from
+      // auth.uid() — no p_user_id / p_user_name / p_user_role is transmitted.
+      const { error } = await supabase.rpc('execute_inventory_adjustment', {
         p_product_id: params.productId,
         p_store_id: params.storeId,
         p_new_quantity: params.newQuantity,
-        p_user_id: params.userId,
-        p_user_name: params.userName,
-        p_user_role: params.userRole,
         p_movement_type: dbMovementType,
         p_notes: params.notes,
       });

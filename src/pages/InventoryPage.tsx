@@ -202,8 +202,10 @@ export const InventoryPage: React.FC = () => {
     chainTotalMap,
   ]);
 
-  // Open adjustment modal
+  // Open adjustment modal (Milestone 7: ADMIN-only; attendants keep
+  // read-only inventory visibility and have no adjustment entry point).
   const handleOpenAdjust = (productId: string, storeId?: string) => {
+    if (!isAdmin) return;
     setModalInitialProduct(productId);
     setModalInitialStore(storeId || (isAdmin ? selectedStoreId : currentStore?.id || 'store-1'));
     setIsAdjustModalOpen(true);
@@ -267,13 +269,16 @@ export const InventoryPage: React.FC = () => {
 
         {/* Action Controls */}
         <div className="flex items-center gap-2.5">
-          <button
-            onClick={() => handleOpenAdjust(products[0]?.id || '')}
-            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-emerald-900/30 transition-all flex items-center gap-2 cursor-pointer"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Stock In / Adjust</span>
-          </button>
+          {/* Milestone 7: manual adjustment is ADMIN-only. */}
+          {isAdmin && (
+            <button
+              onClick={() => handleOpenAdjust(products[0]?.id || '')}
+              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-emerald-900/30 transition-all flex items-center gap-2 cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Stock In / Adjust</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -542,24 +547,44 @@ export const InventoryPage: React.FC = () => {
                           const isZero = qty === 0;
 
                           return (
-                            <td
-                              key={s.id}
-                              onClick={() => handleOpenAdjust(p.id, s.id)}
-                              className="py-2.5 px-2 text-center font-mono cursor-pointer hover:bg-slate-700/50 transition-colors"
-                              title={`Click to adjust stock for ${p.name} at ${s.name}`}
-                            >
-                              <span
-                                className={`inline-block px-2 py-0.5 rounded-md text-[11px] font-semibold transition-transform hover:scale-105 ${
-                                  isZero
-                                    ? 'bg-rose-500/15 text-rose-400 border border-rose-500/30'
-                                    : isLow
-                                    ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
-                                    : 'bg-slate-800/80 text-slate-200 border border-slate-700/60'
-                                }`}
+                            isAdmin ? (
+                              <td
+                                key={s.id}
+                                onClick={() => handleOpenAdjust(p.id, s.id)}
+                                className="py-2.5 px-2 text-center font-mono cursor-pointer hover:bg-slate-700/50 transition-colors"
+                                title={`Click to adjust stock for ${p.name} at ${s.name}`}
                               >
-                                {qty}
-                              </span>
-                            </td>
+                                <span
+                                  className={`inline-block px-2 py-0.5 rounded-md text-[11px] font-semibold transition-transform hover:scale-105 ${
+                                    isZero
+                                      ? 'bg-rose-500/15 text-rose-400 border border-rose-500/30'
+                                      : isLow
+                                      ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+                                      : 'bg-slate-800/80 text-slate-200 border border-slate-700/60'
+                                  }`}
+                                >
+                                  {qty}
+                                </span>
+                              </td>
+                            ) : (
+                              <td
+                                key={s.id}
+                                className="py-2.5 px-2 text-center font-mono"
+                                title="Manual stock adjustment is restricted to Super Admins"
+                              >
+                                <span
+                                  className={`inline-block px-2 py-0.5 rounded-md text-[11px] font-semibold ${
+                                    isZero
+                                      ? 'bg-rose-500/15 text-rose-400 border border-rose-500/30'
+                                      : isLow
+                                      ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+                                      : 'bg-slate-800/80 text-slate-200 border border-slate-700/60'
+                                  }`}
+                                >
+                                  {qty}
+                                </span>
+                              </td>
+                            )
                           );
                         })}
                       </tr>
@@ -682,15 +707,20 @@ export const InventoryPage: React.FC = () => {
                           {formatNaira(estimatedVal)}
                         </td>
 
-                        {/* Quick Adjust Button */}
+                        {/* Milestone 7: manual adjustment is ADMIN-only; attendants keep
+                            read-only visibility with no action control. */}
                         <td className="py-3.5 px-4 text-right">
-                          <button
-                            onClick={() => handleOpenAdjust(product.id, targetStoreId)}
-                            className="px-3 py-1.5 bg-slate-800 hover:bg-emerald-600/30 hover:text-emerald-300 text-slate-300 rounded-lg text-xs font-medium border border-slate-700 transition-colors flex items-center gap-1.5 ml-auto cursor-pointer"
-                          >
-                            <Boxes className="w-3.5 h-3.5 text-emerald-400" />
-                            <span>Adjust</span>
-                          </button>
+                          {isAdmin ? (
+                            <button
+                              onClick={() => handleOpenAdjust(product.id, targetStoreId)}
+                              className="px-3 py-1.5 bg-slate-800 hover:bg-emerald-600/30 hover:text-emerald-300 text-slate-300 rounded-lg text-xs font-medium border border-slate-700 transition-colors flex items-center gap-1.5 ml-auto cursor-pointer"
+                            >
+                              <Boxes className="w-3.5 h-3.5 text-emerald-400" />
+                              <span>Adjust</span>
+                            </button>
+                          ) : (
+                            <span className="text-slate-600 text-xs">—</span>
+                          )}
                         </td>
                       </tr>
                     );

@@ -550,7 +550,8 @@ BEGIN
         'previousQuantity', v_curr_qty
     );
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = public, extensions, pg_temp;
 
 -- ==============================================================================
 -- MILESTONE 5D-C MIGRATION — PRODUCT METADATA + STATUS LIFECYCLE
@@ -946,4 +947,130 @@ FROM anon;
 
 GRANT EXECUTE
 ON FUNCTION public.execute_stock_transfer(text, text, text, integer, text)
+TO authenticated;
+
+-- ==============================================================================
+-- MILESTONE 7 — MANUAL INVENTORY ADJUSTMENT ACCESS CONTROL
+-- ==============================================================================
+-- Manual stock adjustment is ADMIN-only. The legacy adjust_inventory_stock RPC
+-- accepts client-supplied actor identity (p_user_id / p_user_name /
+-- p_user_role), so direct client execution is revoked below and connected
+-- clients must call the new execute_inventory_adjustment wrapper instead.
+--
+-- The wrapper accepts NO actor parameters: it derives the actor from
+-- auth.uid(), reads public.profiles directly, requires role = ADMIN and
+-- status = ACTIVE, then delegates to the frozen adjust_inventory_stock worker
+-- (body untouched) with the verified identity. The worker keeps its own
+-- function-level search_path so its existing unqualified references
+-- (movement_type enum, NOW(), inventory/products/stores/inventory_movements/
+-- audit_logs) keep resolving when invoked from the wrapper's pinned empty
+-- search_path.
+--
+-- process_pos_checkout and execute_stock_transfer are NOT modified here.
+-- Supabase Auth bootstrap (5G), RBAC helpers, RLS policies, seed data and
+-- analytics are NOT modified here. Apply this block in the Supabase SQL
+-- Editor (run-once: REVOKE / GRANT have no IF NOT EXISTS).
+--
+-- 1. New ADMIN-only wrapper delegating to the frozen worker.
+CREATE OR REPLACE FUNCTION public.execute_inventory_adjustment(
+    p_product_id TEXT,
+    p_store_id TEXT,
+    p_new_quantity INTEGER,
+    p_movement_type public.movement_type,
+    p_notes TEXT DEFAULT NULL
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $function$
+DECLARE
+    v_actor_id UUID := auth.uid();
+    v_actor_role TEXT;
+    v_actor_name TEXT;
+    v_actor_status TEXT;
+    v_result JSONB;
+BEGIN
+    -- AuthN: a caller without a JWT identity cannot be attributed.
+    IF v_actor_id IS NULL THEN
+        RAISE EXCEPTION 'Authentication required.';
+    END IF;
+
+    -- AuthZ: direct fully-qualified public.profiles lookup (never client
+    -- params, never RLS-dependent) BEFORE any mutation.
+    SELECT pf.role::text,
+           COALESCE(NULLIF(pf.name, ''), pf.email),
+           pf.status::text
+      INTO v_actor_role, v_actor_name, v_actor_status
+      FROM public.profiles AS pf
+     WHERE pf.id = v_actor_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Authenticated profile not found in public.profiles.';
+    END IF;
+    IF v_actor_role IS DISTINCT FROM 'ADMIN' THEN
+        RAISE EXCEPTION 'Only Super Admins can manually adjust inventory.';
+    END IF;
+    IF v_actor_status IS DISTINCT FROM 'ACTIVE' THEN
+        RAISE EXCEPTION 'Account is not ACTIVE.';
+    END IF;
+
+    -- Delegate to the frozen worker with the verified actor identity. The
+    -- worker performs the inventory update plus exactly one movement row and
+    -- exactly one INVENTORY_ADJUSTED audit row atomically; any failure rolls
+    -- the whole transaction back.
+    SELECT public.adjust_inventory_stock(
+        p_product_id,
+        p_store_id,
+        p_new_quantity,
+        v_actor_id,
+        v_actor_name,
+        v_actor_role,
+        p_movement_type,
+        p_notes
+    ) INTO v_result;
+    RETURN v_result;
+END;
+$function$;
+
+-- 2. Pin the frozen worker's search_path metadata (body untouched) so its
+--    existing unqualified references keep resolving when it is invoked from
+--    the wrapper's pinned empty search_path.
+ALTER FUNCTION public.adjust_inventory_stock(
+    text,
+    text,
+    integer,
+    uuid,
+    text,
+    text,
+    public.movement_type,
+    text
+)
+SET search_path = public, extensions, pg_temp;
+
+-- 3. Revoke direct client execution of the legacy actor-parameter RPC.
+--    Normal clients must use execute_inventory_adjustment. service_role /
+--    owner capability is preserved for internal call-through.
+REVOKE EXECUTE
+ON FUNCTION public.adjust_inventory_stock(text, text, integer, uuid, text, text, public.movement_type, text)
+FROM PUBLIC;
+
+REVOKE EXECUTE
+ON FUNCTION public.adjust_inventory_stock(text, text, integer, uuid, text, text, public.movement_type, text)
+FROM anon;
+
+REVOKE EXECUTE
+ON FUNCTION public.adjust_inventory_stock(text, text, integer, uuid, text, text, public.movement_type, text)
+FROM authenticated;
+
+-- 4. New wrapper is callable by authenticated clients only (never anon).
+REVOKE EXECUTE
+ON FUNCTION public.execute_inventory_adjustment(text, text, integer, public.movement_type, text)
+FROM PUBLIC;
+
+REVOKE EXECUTE
+ON FUNCTION public.execute_inventory_adjustment(text, text, integer, public.movement_type, text)
+FROM anon;
+
+GRANT EXECUTE
+ON FUNCTION public.execute_inventory_adjustment(text, text, integer, public.movement_type, text)
 TO authenticated;

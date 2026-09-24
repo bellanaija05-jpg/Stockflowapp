@@ -153,6 +153,50 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
     adjustmentMode === 'SET_TOTAL' ? inputValue : currentQuantity + inputValue;
   const quantityDiff = targetQuantity - currentQuantity;
 
+  // Milestone 7: defensive restricted render for non-admins. The modal never
+  // presents an adjustment form to an attendant, even if opened through an
+  // unexpected path. The database remains the authoritative boundary.
+  if (!isAdmin) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-xs p-4">
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden animate-in fade-in zoom-in-95">
+          <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-900/80">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 bg-emerald-500/10 text-emerald-400 rounded-xl border border-emerald-500/20">
+                <Boxes className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">Stock Adjustment &amp; Restock</h3>
+                <p className="text-xs text-slate-400">Atomic inventory update with mandatory audit log</p>
+              </div>
+            </div>
+            <button
+              onClick={onClose}
+              className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+          <div className="p-6 space-y-4">
+            <div className="p-3 bg-rose-500/15 border border-rose-500/30 rounded-xl text-rose-300 text-xs flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+              <span>Manual stock adjustment is restricted to Super Admins.</span>
+            </div>
+            <div className="flex items-center justify-end">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-medium transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // Milestone 5D-A: in connected mode, block submission until the
   // authoritative Supabase stock level has loaded (or surface the load error).
   const isDataReady = !SupabaseBridge.isConnected() || (supabaseInventory !== null && !dataLoadError);
@@ -160,6 +204,15 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+
+    // Milestone 7: defensive ADMIN-only guard. Manual stock adjustment must
+    // never submit for an attendant, even if the modal is opened through an
+    // unexpected path. The database remains the authoritative boundary.
+    if (!isAdmin) {
+      setError('Manual stock adjustment is restricted to Super Admins.');
+      setIsSubmitting(false);
+      return;
+    }
 
     if (!selectedProductId) {
       setError('Please select a product.');
@@ -184,9 +237,10 @@ export const StockAdjustmentModal: React.FC<StockAdjustmentModalProps> = ({
 
     try {
       if (SupabaseBridge.isConnected()) {
-        // Milestone 5D-A: authenticated adjustments go through the atomic
-        // adjust_inventory_stock RPC. It is the single authoritative write
-        // (inventory + movement + audit log) — no localStorage writes here.
+        // Milestone 7: connected adjustments go through the ADMIN-only
+        // execute_inventory_adjustment wrapper (actor derived from auth.uid()).
+        // It is the single authoritative write (inventory + movement + audit
+        // log) — no localStorage writes here.
         if (!currentUser) {
           setError('Your session has expired. Please sign in again to adjust stock.');
           setIsSubmitting(false);

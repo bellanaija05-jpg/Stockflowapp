@@ -281,8 +281,9 @@ export const ProductsPage: React.FC = () => {
     setIsAddEditModalOpen(true);
   };
 
-  // Handle quick adjust stock
+  // Handle quick adjust stock (Milestone 7: ADMIN-only).
   const handleQuickAdjustStock = (productId: string) => {
+    if (!isAdmin) return;
     setAdjustProductId(productId);
     setIsAdjustModalOpen(true);
   };
@@ -743,16 +744,16 @@ export const ProductsPage: React.FC = () => {
                       {/* Actions */}
                       <td className="py-3.5 px-4 text-right">
                         <div className="flex items-center justify-end gap-1.5">
-                          <button
-                            onClick={() => handleQuickAdjustStock(product.id)}
-                            className="p-1.5 bg-slate-800 hover:bg-emerald-600/30 hover:text-emerald-300 text-slate-300 rounded-lg transition-colors cursor-pointer"
-                            title="Adjust Stock"
-                          >
-                            <Boxes className="w-3.5 h-3.5" />
-                          </button>
-
                           {isAdmin && (
                             <>
+                              <button
+                                onClick={() => handleQuickAdjustStock(product.id)}
+                                className="p-1.5 bg-slate-800 hover:bg-emerald-600/30 hover:text-emerald-300 text-slate-300 rounded-lg transition-colors cursor-pointer"
+                                title="Adjust Stock"
+                              >
+                                <Boxes className="w-3.5 h-3.5" />
+                              </button>
+
                               <button
                                 onClick={() => handleOpenEditModal(product)}
                                 className="p-1.5 bg-slate-800 hover:bg-indigo-600/30 hover:text-indigo-300 text-slate-300 rounded-lg transition-colors cursor-pointer"
