@@ -6,3 +6,18 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# ---------------------------------------------------------------------------
+# Local working artifacts: AI/agent codebase exports and ad-hoc SQL scratch.
+# Kept on disk for reference, but not part of the repository.
+# ---------------------------------------------------------------------------
+/StockFlow_Codebase.txt
+/StockFlow_Project_Export_For_AI_Studio.zip
+/stockflow_complete.zip
+/seed_history.txt
+/task.md
+/audit.sql
+/audit.ts
+/milestone6.sql
+/execute_stock_transfer_fix.sql
+/scripts/m8f-2c-3-bootstrap-function-repair.sql
